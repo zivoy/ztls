@@ -47,7 +47,7 @@ pub fn StringType(comptime T: type) type {
         const Self = @This();
 
         /// Strings can be at most this length or shorter
-        pub const length_max_long = (@as(comptime_int, 1) << @bitSizeOf(LenType)) - 1;
+        pub const length_max_long = std.math.maxInt(LenType);
         /// The length of a prefix for a long string
         pub const length_prefix_long = prefixLength;
         /// Short strings are either this long or shorter
@@ -181,10 +181,6 @@ pub fn StringType(comptime T: type) type {
 
             // compare by slice
             return std.mem.order(u8, lhs.slice(), rhs.slice());
-        }
-
-        pub fn lessThan(_: void, lhs: Self, rhs: Self) bool {
-            return lhs.order(rhs) == .lt;
         }
 
         fn getAnyArray(self: *const Self, comptime field_name: []const u8) [*]const u8 {
@@ -333,6 +329,10 @@ test "prefix" {
     }
 }
 
+fn lessThan(_: void, lhs: String, rhs: String) bool {
+    return lhs.order(rhs) == .lt;
+}
+
 test "ordering" {
     var strings = [_]String{
         .initUnmanaged("Some"),
@@ -342,7 +342,7 @@ test "ordering" {
         .initUnmanaged("Something"),
     };
 
-    std.mem.sort(String, &strings, {}, String.lessThan);
+    std.mem.sort(String, &strings, {}, lessThan);
 
     const expected = [_][]const u8{
         "Some",
