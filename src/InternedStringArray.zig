@@ -1,8 +1,7 @@
 // idea store strings in one interned array
 // pass out gstrings for the data
 // will need a custom allocator (?) so that freeing a string will allow its space to be be reused
-// have strings be referenced counted and be in the format of
-// [users][bytes...]
+// have strings be referenced counted and
 
 // have storage be freelist like, it will free then strings can populate the smallest available slot
 
@@ -12,9 +11,10 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
-const IndexType = enum(u32) {
+// this being a u40 should allow for about 1tb of total memory, should be enough for most use cases
+const IndexType = enum(u40) {
     _,
-    pub inline fn toBase(self: IndexType) u32 {
+    pub inline fn toBase(self: IndexType) usize {
         return @intFromEnum(self);
     }
 };
@@ -22,7 +22,6 @@ const LenType = u32;
 
 const StoredString = struct {
     index: IndexType,
-    len: LenType, // not used for anything, but could be useful for serialization and debugging
     usage: u32,
 };
 
@@ -30,7 +29,7 @@ const StorageSlot = struct {
     index: IndexType,
     len: LenType,
 
-    fn end(self: StorageSlot) u32 {
+    fn end(self: StorageSlot) usize {
         return self.index.toBase() + self.len;
     }
 
@@ -108,19 +107,25 @@ fn releaseStr(self: *Interner, str: []const u8) bool {
     if (usage.usage > 0) return true;
 
     const index = usage.index;
+    const is_at_end = index.toBase() + str.len == self.storage.items.len;
+
+    if (!is_at_end) {
+        self.slots.ensureUnusedCapacity(self.allocator, 1) catch return false;
+    }
+
     if (!self.storedStrings.swapRemove(str)) return false;
     @memset(self.storage.items[index.toBase() .. index.toBase() + str.len], undefined);
 
-    defer self.mergeSlots();
+    // NOTE: maybe lower this, if 256 is too high
+    defer if (self.slots.items.len > 256) self.mergeSlots();
 
     // easy case
-    if (index.toBase() + str.len == self.storage.items.len) {
+    if (is_at_end) {
         self.storage.items.len -= str.len;
         return true;
     }
 
-    // NOTE: maybe find an available slot and expand it?
-    var el = self.slots.addOne(self.allocator) catch return false;
+    const el = self.slots.addOneAssumeCapacity();
     el.index = index;
     el.len = @truncate(str.len);
 
@@ -129,7 +134,6 @@ fn releaseStr(self: *Interner, str: []const u8) bool {
 
 fn load(self: *Interner, s: []const u8) !IndexType {
     if (self.storedStrings.getPtr(s)) |stored| {
-        assert(s.len == stored.len);
         stored.usage += 1;
         return stored.index;
     }
@@ -143,7 +147,6 @@ fn load(self: *Interner, s: []const u8) !IndexType {
         assert(s.len < String.length_max_long);
         try self.storedStrings.put(self.allocator, s, .{
             .index = idx,
-            .len = @truncate(s.len),
             .usage = 1,
         });
         return idx;
@@ -161,7 +164,6 @@ fn load(self: *Interner, s: []const u8) !IndexType {
         self.storage.replaceRangeAssumeCapacity(idx.toBase(), s.len, s);
         try self.storedStrings.put(self.allocator, s, .{
             .index = idx,
-            .len = @truncate(s.len),
             .usage = 1,
         });
 
@@ -181,7 +183,7 @@ fn load(self: *Interner, s: []const u8) !IndexType {
     unreachable;
 }
 
-fn mergeSlots(self: *Interner) void {
+pub fn mergeSlots(self: *Interner) void {
     if (self.slots.items.len == 0) return;
     // very slow, find a better way
     // maybe also don't sort every time ?
@@ -194,7 +196,7 @@ fn mergeSlots(self: *Interner) void {
         if (current.end() >= next_range.index.toBase()) {
             // Merge
             assert(next_range.end() >= current.end());
-            current.len = next_range.end() - current.index.toBase();
+            current.len = @intCast(next_range.end() - current.index.toBase());
             self.slots.items.len -= 1;
         } else {
             // Save current and move to next
@@ -229,7 +231,7 @@ pub const String = packed struct {
 
     const containerSize = @sizeOf(u64);
     const restSize = (2 * containerSize) - @sizeOf(LenType);
-    const prefixLength = restSize - @sizeOf(IndexType);
+    const prefixLength = restSize - (@bitSizeOf(IndexType) / 8);
 
     const BufferType = std.meta.Int(.unsigned, restSize * 8);
     const PrefixType = std.meta.Int(.unsigned, prefixLength * 8);
@@ -237,6 +239,13 @@ pub const String = packed struct {
     pub const length_max_long = std.math.maxInt(LenType);
     pub const length_prefix_long = prefixLength;
     pub const length_max_short = restSize;
+
+    comptime {
+        const strSize = @sizeOf(String);
+        if (strSize != (2 * containerSize)) {
+            @compileError("String does not fit in 2 of container");
+        }
+    }
 
     len: LenType,
     payload: packed union {
@@ -250,8 +259,6 @@ pub const String = packed struct {
     ) void {
         if (!interner.release(self)) return;
         var selfNonConst = @constCast(self);
-        selfNonConst.len = 0;
-        selfNonConst.payload = undefined;
         selfNonConst = undefined;
     }
 
@@ -325,9 +332,9 @@ test "interning" {
     try testing.expectEqualStrings("some string 1", string3.slice(i));
     try testing.expectEqualStrings("short", string4.slice(i));
 
-    try testing.expectEqualStrings("some str", string1.prefix());
-    try testing.expectEqualStrings("some str", string2.prefix());
-    try testing.expectEqualStrings("some str", string3.prefix());
+    try testing.expectEqualStrings("some st", string1.prefix());
+    try testing.expectEqualStrings("some st", string2.prefix());
+    try testing.expectEqualStrings("some st", string3.prefix());
     try testing.expectEqualStrings("short", string4.prefix());
 
     try testing.expectEqualStrings("some string 1some string 2", i.storage.items);
@@ -371,7 +378,9 @@ test "holes" {
     try testing.expectEqual(null, i.peekMinSlot());
 
     _ = i.releaseStr(string1);
+    i.mergeSlots();
     // ____________b
+
     try testing.expectEqual(13, i.storage.items.len);
     try testing.expectEqual(1, i.slots.items.len);
     try testing.expectEqualDeep(StorageSlot{ .len = 12, .index = @enumFromInt(0) }, i.peekMaxSlot().?);
@@ -387,6 +396,7 @@ test "holes" {
     try testing.expectEqualDeep(StorageSlot{ .len = 2, .index = @enumFromInt(10) }, i.peekMinSlot().?);
 
     _ = i.releaseStr(string3);
+    i.mergeSlots();
     // ________dd__b
     try testing.expectEqual(2, i.slots.items.len);
     try testing.expectEqualDeep(StorageSlot{ .len = 8, .index = @enumFromInt(0) }, i.peekMaxSlot().?);
@@ -402,12 +412,14 @@ test "holes" {
     try testing.expectEqualDeep(StorageSlot{ .len = 1, .index = @enumFromInt(7) }, i.peekMinSlot().?);
 
     _ = i.releaseStr(string5);
+    i.mergeSlots();
     // ____fff_dd__b
     try testing.expectEqual(3, i.slots.items.len);
     try testing.expectEqualDeep(StorageSlot{ .len = 4, .index = @enumFromInt(0) }, i.peekMaxSlot().?);
     try testing.expectEqualDeep(StorageSlot{ .len = 1, .index = @enumFromInt(7) }, i.peekMinSlot().?);
 
     _ = i.releaseStr(string4);
+    i.mergeSlots();
     // ____fff_____b
     try testing.expectEqual(13, i.storage.items.len);
     try testing.expectEqual(2, i.slots.items.len);
@@ -415,6 +427,7 @@ test "holes" {
     try testing.expectEqualDeep(StorageSlot{ .len = 4, .index = @enumFromInt(0) }, i.peekMinSlot().?);
 
     _ = i.releaseStr(string2);
+    i.mergeSlots();
     // ____fff
     try testing.expectEqual(7, i.storage.items.len);
     try testing.expectEqual(1, i.slots.items.len);
