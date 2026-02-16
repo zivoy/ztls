@@ -34,7 +34,7 @@ slots: std.ArrayList(Span),
 /// The amount of holes that are needed to exist before a merge will happen automatically
 slotMergeThreshold: u16 = defaultSlotMergeThreshold,
 
-allocator: std.mem.Allocator,
+gpa: std.mem.Allocator,
 const Interner = @This();
 
 // Key for the HashMap (Index + Length)
@@ -85,38 +85,36 @@ const InternerContext = struct {
     }
 };
 
-pub fn initEmpty(allocator: std.mem.Allocator) Interner {
+pub fn initEmpty(gpa: std.mem.Allocator) Interner {
     return Interner{
-        .allocator = allocator,
+        .gpa = gpa,
         .storage = .empty,
         .storedStrings = .empty,
         .slots = .empty,
     };
 }
 
-pub fn initCapacity(allocator: std.mem.Allocator, stringCapacity: u40, holeCapacity: u32, hashMapCapacity: u32) !Interner {
-    var interner = initEmpty(allocator);
-
-    try interner.storage.ensureTotalCapacity(allocator, stringCapacity);
-    errdefer interner.storage.deinit(allocator);
-    try interner.slots.ensureTotalCapacity(allocator, holeCapacity);
-    errdefer interner.slots.deinit(allocator);
-    try interner.storedStrings.ensureTotalCapacityContext(allocator, hashMapCapacity, interner.getContext());
-
+pub fn initCapacity(gpa: std.mem.Allocator, stringCapacity: u40, holeCapacity: u32, hashMapCapacity: u32) !Interner {
+    var interner = initEmpty(gpa);
+    try interner.ensureTotalCapacity(stringCapacity, holeCapacity, hashMapCapacity);
     return interner;
 }
 
-pub fn init(allocator: std.mem.Allocator) !Interner {
+pub fn init(gpa: std.mem.Allocator) !Interner {
     // 4 mb of storage, that can store 1000 strings and have 256 (merge threshold) + 1 holes
-    return initCapacity(allocator, 4 * 1024 * 1024, defaultSlotMergeThreshold + 1, 1000);
+    return initCapacity(gpa, 4 * 1024 * 1024, defaultSlotMergeThreshold + 1, 1000);
 }
 
-// TODO: make more zig like, pass the allocator to anything that will or might allocate?
+pub fn ensureTotalCapacity(self: *Interner, stringCapacity: u40, holeCapacity: u32, hashMapCapacity: u32) !void {
+    try self.storage.ensureTotalCapacity(self.gpa, stringCapacity);
+    try self.slots.ensureTotalCapacity(self.gpa, holeCapacity);
+    try self.storedStrings.ensureTotalCapacityContext(self.gpa, hashMapCapacity, self.getContext());
+}
 
 pub fn deinit(self: *Interner) void {
-    self.storedStrings.deinit(self.allocator);
-    self.storage.deinit(self.allocator);
-    self.slots.deinit(self.allocator);
+    self.storedStrings.deinit(self.gpa);
+    self.storage.deinit(self.gpa);
+    self.slots.deinit(self.gpa);
 }
 
 fn getContext(self: *const Interner) InternerContext {
@@ -183,7 +181,7 @@ fn releaseKey(self: *Interner, key: Span) bool {
     }
 
     // Best effort slot creation
-    if (self.slots.ensureUnusedCapacity(self.allocator, 1)) {
+    if (self.slots.ensureUnusedCapacity(self.gpa, 1)) {
         const el = self.slots.addOneAssumeCapacity();
         el.index = key.index;
         el.len = key.len;
@@ -199,7 +197,7 @@ fn releaseKey(self: *Interner, key: Span) bool {
 fn load(self: *Interner, s: []const u8) !IndexType {
     // get existing
     const ctx = self.getContext();
-    const result = try self.storedStrings.getOrPutContextAdapted(self.allocator, s, ctx, ctx);
+    const result = try self.storedStrings.getOrPutContextAdapted(self.gpa, s, ctx, ctx);
     if (result.found_existing) {
         result.value_ptr.* += 1;
         return result.key_ptr.index;
@@ -212,7 +210,7 @@ fn load(self: *Interner, s: []const u8) !IndexType {
     if (needMoreSpace) {
         // append to the end
         idx = @enumFromInt(self.storage.items.len);
-        try self.storage.appendSlice(self.allocator, s);
+        try self.storage.appendSlice(self.gpa, s);
     } else {
         // there _will_ be a slot with space to hold the string
         var found_slot_index: usize = undefined;
