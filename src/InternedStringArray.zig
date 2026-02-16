@@ -4,10 +4,17 @@
 // have strings be referenced counted and be in the format of
 // [users][bytes...]
 
+// have storage be freelist like, it will free then strings can populate the smallest available slot
+
 const std = @import("std");
 const assert = std.debug.assert;
 
-const IndexType = enum(u32) { _ };
+const IndexType = enum(u32) {
+    _,
+    pub inline fn toBase(self: IndexType) u32 {
+        return @intFromEnum(self);
+    }
+};
 const LenType = u32;
 
 const StoredString = struct {
@@ -16,8 +23,20 @@ const StoredString = struct {
     usage: u32,
 };
 
+const StorageSlot = struct {
+    index: IndexType,
+    len: LenType,
+
+    fn order(_: void, a: StorageSlot, b: StorageSlot) std.math.Order {
+        return std.math.order(a.index.toBase(), b.index.toBase());
+    }
+};
+
+// can this be simplified, do we need all 3 items?
 storage: std.ArrayList(u8),
 storedStrings: std.StringArrayHashMapUnmanaged(StoredString),
+slots: std.PriorityDequeue(StorageSlot, void, StorageSlot.order),
+
 allocator: std.mem.Allocator,
 const Interner = @This();
 
@@ -26,12 +45,14 @@ pub fn init(allocator: std.mem.Allocator) Interner {
         .allocator = allocator,
         .storage = .empty,
         .storedStrings = .empty,
+        .slots = .init(allocator, {}),
     };
 }
 
 pub fn deinit(self: *Interner) void {
     self.storedStrings.deinit(self.allocator);
     self.storage.deinit(self.allocator);
+    self.slots.deinit();
 }
 
 pub fn intern(self: *Interner, s: []const u8) !String {
@@ -62,7 +83,7 @@ pub fn intern(self: *Interner, s: []const u8) !String {
     } };
 }
 
-fn free(self: *Interner, s: *const String) bool {
+pub fn release(self: *Interner, s: *const String) bool {
     if (s.len <= String.length_max_short) return true;
 
     const str = s.slice(self.*);
@@ -71,7 +92,7 @@ fn free(self: *Interner, s: *const String) bool {
     usage.usage -= 1;
     std.debug.print("Usage: {d}\n", .{usage.usage});
     if (usage.usage == 0) {
-        const index: usize = @intFromEnum(usage.index);
+        const index: usize = usage.index.toBase();
         if (!self.storedStrings.swapRemove(str)) return false;
         @memset(self.storage.items[index .. index + s.len], undefined);
 
@@ -130,7 +151,7 @@ pub const String = packed struct {
         self: *const String,
         interner: *Interner,
     ) void {
-        if (!interner.free(self)) return;
+        if (!interner.release(self)) return;
         var selfNonConst = @constCast(self);
         selfNonConst.len = 0;
         selfNonConst.payload = undefined;
@@ -171,7 +192,7 @@ pub const String = packed struct {
     /// get a slice to the string
     pub fn slice(self: *const String, interner: Interner) []const u8 {
         if (self.len > length_max_short) {
-            const index: usize = @intFromEnum(self.payload.interned.index);
+            const index: usize = self.payload.interned.index.toBase();
             return interner.storage.items[index .. index + self.len];
         }
 
@@ -197,6 +218,7 @@ test "interning" {
     const string1 = try i.intern("some string 1");
     const string2 = try i.intern("some string 2");
     const string3 = try i.intern("some string 1");
+    const string4 = try i.intern("short");
 
     try testing.expect(string1.eql(string3));
     try testing.expect(!string1.eql(string2));
@@ -204,13 +226,97 @@ test "interning" {
     try testing.expectEqualStrings("some string 1", string1.slice(i));
     try testing.expectEqualStrings("some string 2", string2.slice(i));
     try testing.expectEqualStrings("some string 1", string3.slice(i));
+    try testing.expectEqualStrings("short", string4.slice(i));
 
     try testing.expectEqualStrings("some str", string1.prefix());
     try testing.expectEqualStrings("some str", string2.prefix());
     try testing.expectEqualStrings("some str", string3.prefix());
+    try testing.expectEqualStrings("short", string4.prefix());
+
+    try testing.expectEqualStrings("some string 1some string 2", i.storage.items);
+}
+
+test "reuse" {
+    var i = Interner.init(testing.allocator);
+    defer i.deinit();
+
+    const string1 = try i.intern("some string 1");
+    const string2 = try i.intern("some string 2");
+
+    try testing.expectEqualStrings("some string 1some string 2", i.storage.items);
+
+    string2.deinit(&i);
+
+    try testing.expectEqualStrings("some string 1", i.storage.items);
+
+    _ = try i.intern("a different second string");
+
+    try testing.expectEqualStrings("some string 1a different second string", i.storage.items);
 
     string1.deinit(&i);
-    string3.deinit(&i);
+
+    _ = try i.intern("same length s");
+
+    try testing.expectEqualStrings("same length sa different second string", i.storage.items);
 
     std.debug.print("'{s}'\n", .{i.storage.items});
+}
+
+test "holes" {
+    var i = Interner.init(testing.allocator);
+    defer i.deinit();
+
+    const string1 = try i.intern("aaaaaaaaaaaa");
+    const string2 = try i.intern("b");
+    // aaaaaaaaaaaab
+    try testing.expectEqualStrings("aaaaaaaaaaaab", i.storage.items);
+    try testing.expectEqual(null, i.slots.peekMax());
+    try testing.expectEqual(null, i.slots.peekMin());
+
+    string1.deinit(&i);
+    // ____________b
+    try testing.expectEqual(13, i.storage.items.len);
+    try testing.expectEqual(1, i.slots.len);
+    try testing.expectEqualDeep(StorageSlot{ .len = 12, .index = @enumFromInt(0) }, i.slots.peekMax().?);
+    try testing.expectEqualDeep(StorageSlot{ .len = 12, .index = @enumFromInt(0) }, i.slots.peekMin().?);
+
+    const string3 = try i.intern("cccccccc");
+    const string4 = try i.intern("dd");
+    // ccccccccdd__b
+    try testing.expectEqual(1, i.slots.len);
+    try testing.expectEqualDeep(StorageSlot{ .len = 2, .index = @enumFromInt(10) }, i.slots.peekMax().?);
+    try testing.expectEqualDeep(StorageSlot{ .len = 2, .index = @enumFromInt(10) }, i.slots.peekMin().?);
+
+    string3.deinit(&i);
+    // ________dd__b
+    try testing.expectEqual(2, i.slots.len);
+    try testing.expectEqualDeep(StorageSlot{ .len = 8, .index = @enumFromInt(0) }, i.slots.peekMax().?);
+    try testing.expectEqualDeep(StorageSlot{ .len = 2, .index = @enumFromInt(10) }, i.slots.peekMin().?);
+
+    _ = try i.intern("ffff");
+    const string5 = try i.intern("e");
+    // ffffe___dd__b
+    try testing.expectEqual(2, i.slots.len);
+    try testing.expectEqualDeep(StorageSlot{ .len = 3, .index = @enumFromInt(5) }, i.slots.peekMax().?);
+    try testing.expectEqualDeep(StorageSlot{ .len = 2, .index = @enumFromInt(10) }, i.slots.peekMin().?);
+
+    string5.deinit(&i);
+    // ____e___dd__b
+    try testing.expectEqual(3, i.slots.len);
+    try testing.expectEqualDeep(StorageSlot{ .len = 4, .index = @enumFromInt(5) }, i.slots.peekMax().?);
+    try testing.expectEqualDeep(StorageSlot{ .len = 2, .index = @enumFromInt(10) }, i.slots.peekMin().?);
+
+    string4.deinit(&i);
+    // ____e_______b
+    try testing.expectEqual(13, i.storage.items.len);
+    try testing.expectEqual(2, i.slots.len);
+    try testing.expectEqualDeep(StorageSlot{ .len = 7, .index = @enumFromInt(5) }, i.slots.peekMax().?);
+    try testing.expectEqualDeep(StorageSlot{ .len = 4, .index = @enumFromInt(0) }, i.slots.peekMin().?);
+
+    string2.deinit(&i);
+    // ____e
+    try testing.expectEqual(5, i.storage.items.len);
+    try testing.expectEqual(1, i.slots.len);
+    try testing.expectEqualDeep(StorageSlot{ .len = 4, .index = @enumFromInt(0) }, i.slots.peekMax().?);
+    try testing.expectEqualDeep(StorageSlot{ .len = 4, .index = @enumFromInt(0) }, i.slots.peekMin().?);
 }
