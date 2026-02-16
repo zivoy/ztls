@@ -33,10 +33,10 @@ pub fn StringType(comptime T: type) type {
 
     // a strings length is 2 usizes long, so a length of string is half of a pointer
     // on a 64 bit arch its half of a 8 bytes (64 bits) so its 4 bytes or a u32
-    const containerSize = @bitSizeOf(T) / std.mem.byte_size_in_bits;
+    const containerSize = @divExact(@bitSizeOf(T), std.mem.byte_size_in_bits);
     const LenType = std.meta.Int(.unsigned, @divExact(@bitSizeOf(T), 2));
     // on a 64 bit arch, this will result in 12 (bytes)
-    const restSize = (2 * containerSize) - (@bitSizeOf(LenType) / std.mem.byte_size_in_bits);
+    const restSize = (2 * containerSize) - @divExact(@bitSizeOf(LenType), std.mem.byte_size_in_bits);
     const prefixLength = restSize - containerSize;
 
     const BufferType = std.meta.Int(.unsigned, restSize * std.mem.byte_size_in_bits);
