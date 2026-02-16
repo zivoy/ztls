@@ -20,37 +20,64 @@ const IndexType = enum(u40) {
 };
 const LenType = u32;
 
-const StoredString = struct {
-    index: IndexType,
-    usage: u32,
-};
-
-const StorageSlot = struct {
-    index: IndexType,
-    len: LenType,
-
-    fn end(self: StorageSlot) usize {
-        return self.index.toBase() + self.len;
-    }
-
-    fn orderByLenLt(_: void, a: StorageSlot, b: StorageSlot) bool {
-        return a.len < b.len;
-    }
-
-    fn orderByIdxLt(_: void, a: StorageSlot, b: StorageSlot) bool {
-        return a.index.toBase() < b.index.toBase();
-    }
-};
-
 // can this be simplified, do we need all 3 items?
 storage: std.ArrayList(u8),
-storedStrings: std.StringArrayHashMapUnmanaged(StoredString),
-slots: std.ArrayList(StorageSlot),
+// Map: Key(Index, Len) -> Usage(u32)
+storedStrings: std.HashMapUnmanaged(Span, u32, InternerContext, 80),
+slots: std.ArrayList(Span),
 // NOTE: maybe switch to a soa
 //       also store a second list sorted by index to make merging faster
 
 allocator: std.mem.Allocator,
 const Interner = @This();
+
+// Key for the HashMap (Index + Length)
+// This is also used for the StorageSlot
+const Span = struct {
+    index: IndexType,
+    len: LenType,
+
+    fn end(self: Span) usize {
+        return self.index.toBase() + self.len;
+    }
+
+    fn orderByLenLt(_: void, a: Span, b: Span) bool {
+        return a.len < b.len;
+    }
+
+    fn orderByIdxLt(_: void, a: Span, b: Span) bool {
+        return a.index.toBase() < b.index.toBase();
+    }
+};
+
+// Context for the HashMap that resolves Indices to Strings via Storage
+const InternerContext = struct {
+    storage: []const u8,
+
+    pub fn hash(self: InternerContext, key: anytype) u64 {
+        const T = @TypeOf(key);
+        const str = switch (T) {
+            Span => self.storage[key.index.toBase() .. key.index.toBase() + key.len],
+            []const u8 => key,
+            else => @compileError("InternerContext.hash: Unsupported key type '" ++ @typeName(T) ++ "'"),
+        };
+        return std.hash.Wyhash.hash(0, str);
+    }
+
+    pub fn eql(self: InternerContext, a: anytype, b: anytype) bool {
+        const strA: []const u8 = switch (@TypeOf(a)) {
+            Span => self.storage[a.index.toBase() .. a.index.toBase() + a.len],
+            []const u8 => a,
+            else => @compileError("InternerContext.eql: Unsupported type for A '" ++ @typeName(@TypeOf(a)) ++ "'"),
+        };
+        const strB: []const u8 = switch (@TypeOf(b)) {
+            Span => self.storage[b.index.toBase() .. b.index.toBase() + b.len],
+            []const u8 => b,
+            else => @compileError("InternerContext.eql: Unsupported type for B '" ++ @typeName(@TypeOf(b)) ++ "'"),
+        };
+        return std.mem.eql(u8, strA, strB);
+    }
+};
 
 pub fn init(allocator: std.mem.Allocator) Interner {
     return Interner{
@@ -61,10 +88,17 @@ pub fn init(allocator: std.mem.Allocator) Interner {
     };
 }
 
+// TODO: init capacity
+// TODO: make more zig like, pass the allocator to anything that will or might allocate?
+
 pub fn deinit(self: *Interner) void {
     self.storedStrings.deinit(self.allocator);
     self.storage.deinit(self.allocator);
     self.slots.deinit(self.allocator);
+}
+
+fn getContext(self: *const Interner) InternerContext {
+    return .{ .storage = self.storage.items };
 }
 
 pub fn intern(self: *Interner, s: []const u8) !String {
@@ -98,96 +132,109 @@ pub fn intern(self: *Interner, s: []const u8) !String {
 pub fn release(self: *Interner, s: *const String) bool {
     if (s.len <= String.length_max_short) return true;
 
-    const str = s.slice(self.*);
-    return self.releaseStr(str);
+    return self.releaseKey(.{
+        .index = s.payload.interned.index,
+        .len = s.len,
+    });
 }
-fn releaseStr(self: *Interner, str: []const u8) bool {
-    const usage = self.storedStrings.getPtr(str) orelse return false;
-    usage.usage -= 1;
-    if (usage.usage > 0) return true;
 
-    const index = usage.index;
-    const is_at_end = index.toBase() + str.len == self.storage.items.len;
+fn releaseKey(self: *Interner, key: Span) bool {
+    const ctx = self.getContext();
+    const usage = self.storedStrings.getPtrContext(key, ctx) orelse return false;
+    usage.* -= 1;
+    if (usage.* > 0) return true;
 
-    if (!is_at_end) {
-        self.slots.ensureUnusedCapacity(self.allocator, 1) catch return false;
-    }
+    // Remove from map
+    _ = self.storedStrings.removeContext(key, ctx);
 
-    if (!self.storedStrings.swapRemove(str)) return false;
-    @memset(self.storage.items[index.toBase() .. index.toBase() + str.len], undefined);
+    assert(key.end() <= self.storage.items.len);
+
+    @memset(self.storage.items[key.index.toBase()..key.end()], undefined);
 
     // NOTE: maybe lower this, if 256 is too high
     defer if (self.slots.items.len > 256) self.mergeSlots();
 
     // easy case
+    const is_at_end = key.end() == self.storage.items.len;
     if (is_at_end) {
-        self.storage.items.len -= str.len;
+        self.storage.items.len -= key.len;
         return true;
     }
 
-    const el = self.slots.addOneAssumeCapacity();
-    el.index = index;
-    el.len = @truncate(str.len);
+    // Best effort slot creation
+    if (self.slots.ensureUnusedCapacity(self.allocator, 1)) {
+        const el = self.slots.addOneAssumeCapacity();
+        el.index = key.index;
+        el.len = key.len;
+    } else |_| {
+        // If we can't allocate a slot, we leak this hole.
+        // But we prevented the map entry leak.
+        // This is acceptable for OOM handling.
+    }
 
     return true;
 }
 
 fn load(self: *Interner, s: []const u8) !IndexType {
-    if (self.storedStrings.getPtr(s)) |stored| {
-        stored.usage += 1;
-        return stored.index;
+    // get existing
+    const ctx = self.getContext();
+    const result = try self.storedStrings.getOrPutContextAdapted(self.allocator, s, ctx, ctx);
+    if (result.found_existing) {
+        result.value_ptr.* += 1;
+        return result.key_ptr.index;
     }
+    errdefer _ = self.storedStrings.removeByPtr(result.key_ptr);
 
-    const needMore = if (self.peekMaxSlot()) |slot| slot.len < s.len else true;
-    if (needMore) {
-        // no slot is big enough, allocate more
-        const idx: IndexType = @enumFromInt(self.storage.items.len);
+    var idx: IndexType = undefined;
+
+    const needMoreSpace = if (self.peekMaxSlot()) |slot| slot.len < s.len else true;
+    if (needMoreSpace) {
+        // append to the end
+        idx = @enumFromInt(self.storage.items.len);
         try self.storage.appendSlice(self.allocator, s);
-        errdefer self.storage.items.len -= s.len;
-        assert(s.len < String.length_max_long);
-        try self.storedStrings.put(self.allocator, s, .{
-            .index = idx,
-            .usage = 1,
-        });
-        return idx;
-    }
+    } else {
+        // there _will_ be a slot with space to hold the string
+        var found_slot_index: usize = undefined;
+        var slot_entry: Span = undefined;
+        // for debugging
+        var found = false;
 
-    var i: usize = 0;
-    while (i < self.slots.items.len) {
-        const slot = self.slots.items[i];
-        i += 1;
-        // first match
-        if (slot.len < s.len) continue;
-        assert(s.len <= slot.len);
-
-        const idx = slot.index;
-        self.storage.replaceRangeAssumeCapacity(idx.toBase(), s.len, s);
-        try self.storedStrings.put(self.allocator, s, .{
-            .index = idx,
-            .usage = 1,
-        });
-
-        // consomme the slot
-        const slotIndex = i - 1;
-        if (s.len == slot.len) {
-            _ = self.slots.orderedRemove(slotIndex);
-        } else {
-            self.slots.items[slotIndex].index = @enumFromInt(@intFromEnum(slot.index) + s.len);
-            self.slots.items[slotIndex].len = slot.len - @as(LenType, @truncate(s.len));
-            // NOTE: can this be done without a sort, at least we only have to sort below
-            std.mem.sortUnstable(StorageSlot, self.slots.items[0..i], {}, StorageSlot.orderByLenLt);
+        for (self.slots.items, 0..) |slot, i| {
+            if (slot.len >= s.len) {
+                found_slot_index = i;
+                slot_entry = slot;
+                found = true;
+                break;
+            }
         }
+        assert(found);
 
-        return idx;
+        idx = slot_entry.index;
+        self.storage.replaceRangeAssumeCapacity(idx.toBase(), s.len, s);
+
+        // consume slot
+        if (s.len == slot_entry.len) {
+            _ = self.slots.orderedRemove(found_slot_index);
+        } else {
+            self.slots.items[found_slot_index].index = @enumFromInt(@intFromEnum(slot_entry.index) + s.len);
+            self.slots.items[found_slot_index].len = slot_entry.len - @as(LenType, @truncate(s.len));
+            // since the hole shrunk, we only have to sort the items that are below it
+            std.mem.sortUnstable(Span, self.slots.items[0 .. found_slot_index + 1], {}, Span.orderByLenLt);
+        }
     }
-    unreachable;
+
+    // fill info for map
+    result.key_ptr.* = .{ .index = idx, .len = @intCast(s.len) };
+    result.value_ptr.* = 1;
+
+    return idx;
 }
 
 pub fn mergeSlots(self: *Interner) void {
     if (self.slots.items.len == 0) return;
     // very slow, find a better way
     // maybe also don't sort every time ?
-    std.mem.sortUnstable(StorageSlot, self.slots.items, {}, StorageSlot.orderByIdxLt);
+    std.mem.sortUnstable(Span, self.slots.items, {}, Span.orderByIdxLt);
 
     var write_idx: usize = 0;
     var current = self.slots.items[0];
@@ -214,14 +261,14 @@ pub fn mergeSlots(self: *Interner) void {
         self.slots.items.len -= 1;
     }
 
-    std.mem.sortUnstable(StorageSlot, self.slots.items, {}, StorageSlot.orderByLenLt);
+    std.mem.sortUnstable(Span, self.slots.items, {}, Span.orderByLenLt);
 }
 
-fn peekMaxSlot(self: Interner) ?StorageSlot {
+fn peekMaxSlot(self: Interner) ?Span {
     if (self.slots.items.len == 0) return null;
     return self.slots.items[self.slots.items.len - 1];
 }
-fn peekMinSlot(self: Interner) ?StorageSlot {
+fn peekMinSlot(self: Interner) ?Span {
     if (self.slots.items.len == 0) return null;
     return self.slots.items[0];
 }
@@ -258,6 +305,7 @@ pub const String = packed struct {
         interner: *Interner,
     ) void {
         if (!interner.release(self)) return;
+        // make the callers value be undefined, this is only for debugging to help catch use after frees
         var selfNonConst = @constCast(self);
         selfNonConst = undefined;
     }
@@ -314,6 +362,14 @@ pub const String = packed struct {
 };
 
 const testing = std.testing;
+
+fn releaseStr(self: *Interner, str: []const u8) bool {
+    const ctx = self.getContext();
+    const entry = self.storedStrings.getEntryAdapted(str, ctx) orelse return false;
+    // Entry key_ptr points to the Key stored in the map
+    const key = entry.key_ptr.*;
+    return self.releaseKey(key);
+}
 
 test "interning" {
     var i = Interner.init(testing.allocator);
@@ -383,8 +439,8 @@ test "holes" {
 
     try testing.expectEqual(13, i.storage.items.len);
     try testing.expectEqual(1, i.slots.items.len);
-    try testing.expectEqualDeep(StorageSlot{ .len = 12, .index = @enumFromInt(0) }, i.peekMaxSlot().?);
-    try testing.expectEqualDeep(StorageSlot{ .len = 12, .index = @enumFromInt(0) }, i.peekMinSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 12, .index = @enumFromInt(0) }, i.peekMaxSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 12, .index = @enumFromInt(0) }, i.peekMinSlot().?);
 
     const string3 = "cccccccc";
     _ = try i.load(string3);
@@ -392,15 +448,15 @@ test "holes" {
     _ = try i.load(string4);
     // ccccccccdd__b
     try testing.expectEqual(1, i.slots.items.len);
-    try testing.expectEqualDeep(StorageSlot{ .len = 2, .index = @enumFromInt(10) }, i.peekMaxSlot().?);
-    try testing.expectEqualDeep(StorageSlot{ .len = 2, .index = @enumFromInt(10) }, i.peekMinSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 2, .index = @enumFromInt(10) }, i.peekMaxSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 2, .index = @enumFromInt(10) }, i.peekMinSlot().?);
 
     _ = i.releaseStr(string3);
     i.mergeSlots();
     // ________dd__b
     try testing.expectEqual(2, i.slots.items.len);
-    try testing.expectEqualDeep(StorageSlot{ .len = 8, .index = @enumFromInt(0) }, i.peekMaxSlot().?);
-    try testing.expectEqualDeep(StorageSlot{ .len = 2, .index = @enumFromInt(10) }, i.peekMinSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 8, .index = @enumFromInt(0) }, i.peekMaxSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 2, .index = @enumFromInt(10) }, i.peekMinSlot().?);
 
     const string5 = "eeee";
     _ = try i.load(string5);
@@ -408,36 +464,36 @@ test "holes" {
     _ = try i.load("fff");
     // eeeefff_dd__b
     try testing.expectEqual(2, i.slots.items.len);
-    try testing.expectEqualDeep(StorageSlot{ .len = 2, .index = @enumFromInt(10) }, i.peekMaxSlot().?);
-    try testing.expectEqualDeep(StorageSlot{ .len = 1, .index = @enumFromInt(7) }, i.peekMinSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 2, .index = @enumFromInt(10) }, i.peekMaxSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 1, .index = @enumFromInt(7) }, i.peekMinSlot().?);
 
     _ = i.releaseStr(string5);
     i.mergeSlots();
     // ____fff_dd__b
     try testing.expectEqual(3, i.slots.items.len);
-    try testing.expectEqualDeep(StorageSlot{ .len = 4, .index = @enumFromInt(0) }, i.peekMaxSlot().?);
-    try testing.expectEqualDeep(StorageSlot{ .len = 1, .index = @enumFromInt(7) }, i.peekMinSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 4, .index = @enumFromInt(0) }, i.peekMaxSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 1, .index = @enumFromInt(7) }, i.peekMinSlot().?);
 
     _ = i.releaseStr(string4);
     i.mergeSlots();
     // ____fff_____b
     try testing.expectEqual(13, i.storage.items.len);
     try testing.expectEqual(2, i.slots.items.len);
-    try testing.expectEqualDeep(StorageSlot{ .len = 5, .index = @enumFromInt(7) }, i.peekMaxSlot().?);
-    try testing.expectEqualDeep(StorageSlot{ .len = 4, .index = @enumFromInt(0) }, i.peekMinSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 5, .index = @enumFromInt(7) }, i.peekMaxSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 4, .index = @enumFromInt(0) }, i.peekMinSlot().?);
 
     _ = i.releaseStr(string2);
     i.mergeSlots();
     // ____fff
     try testing.expectEqual(7, i.storage.items.len);
     try testing.expectEqual(1, i.slots.items.len);
-    try testing.expectEqualDeep(StorageSlot{ .len = 4, .index = @enumFromInt(0) }, i.peekMaxSlot().?);
-    try testing.expectEqualDeep(StorageSlot{ .len = 4, .index = @enumFromInt(0) }, i.peekMinSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 4, .index = @enumFromInt(0) }, i.peekMaxSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 4, .index = @enumFromInt(0) }, i.peekMinSlot().?);
 
     _ = try i.load("gggggg");
     // ____fffgggggg
     try testing.expectEqual(13, i.storage.items.len);
     try testing.expectEqual(1, i.slots.items.len);
-    try testing.expectEqualDeep(StorageSlot{ .len = 4, .index = @enumFromInt(0) }, i.peekMaxSlot().?);
-    try testing.expectEqualDeep(StorageSlot{ .len = 4, .index = @enumFromInt(0) }, i.peekMinSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 4, .index = @enumFromInt(0) }, i.peekMaxSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 4, .index = @enumFromInt(0) }, i.peekMinSlot().?);
 }
