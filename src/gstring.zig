@@ -21,10 +21,9 @@ const builtin = @import("builtin");
 pub const String = StringType(std.meta.Int(.unsigned, builtin.target.ptrBitWidth()));
 
 pub fn StringType(comptime T: type) type {
-    const t = @typeInfo(T);
-    switch (t) {
+    switch (@typeInfo(T)) {
         .int => |ti| {
-            if (ti.signedness == .signed) @compileError("Type has to be signed");
+            if (ti.signedness == .signed) @compileError("Type has to be unsigned");
             if ((ti.bits % std.mem.byte_size_in_bits) != 0) @compileError("Container has to be a full multiple of an 8 bit byte");
             if (((ti.bits / std.mem.byte_size_in_bits) % 2) != 0) @compileError("Container has to be a an even number of bytes");
             if (ti.bits < std.mem.byte_size_in_bits * 2) @compileError("Container has to be at least 2 bytes large");
@@ -34,10 +33,10 @@ pub fn StringType(comptime T: type) type {
 
     // a strings length is 2 usizes long, so a length of string is half of a pointer
     // on a 64 bit arch its half of a 8 bytes (64 bits) so its 4 bytes or a u32
-    const containerSize = @sizeOf(T);
+    const containerSize = @bitSizeOf(T) / std.mem.byte_size_in_bits;
     const LenType = std.meta.Int(.unsigned, @divExact(@bitSizeOf(T), 2));
     // on a 64 bit arch, this will result in 12 (bytes)
-    const restSize = (2 * containerSize) - @sizeOf(LenType);
+    const restSize = (2 * containerSize) - (@bitSizeOf(LenType) / std.mem.byte_size_in_bits);
     const prefixLength = restSize - containerSize;
 
     const BufferType = std.meta.Int(.unsigned, restSize * std.mem.byte_size_in_bits);
