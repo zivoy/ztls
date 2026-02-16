@@ -30,15 +30,31 @@ const StorageSlot = struct {
     index: IndexType,
     len: LenType,
 
-    fn order(_: void, a: StorageSlot, b: StorageSlot) std.math.Order {
+    fn end(self: StorageSlot) u32 {
+        return self.index.toBase() + self.len;
+    }
+
+    fn orderByLen(_: void, a: StorageSlot, b: StorageSlot) std.math.Order {
         return std.math.order(a.len, b.len);
+    }
+    fn orderByLenLt(_: void, a: StorageSlot, b: StorageSlot) bool {
+        return orderByLen({}, a, b) == .lt;
+    }
+
+    fn orderByIdx(_: void, a: StorageSlot, b: StorageSlot) std.math.Order {
+        return std.math.order(a.index.toBase(), b.index.toBase());
+    }
+    fn orderByIdxLt(_: void, a: StorageSlot, b: StorageSlot) bool {
+        return orderByIdx({}, a, b) == .lt;
     }
 };
 
 // can this be simplified, do we need all 3 items?
 storage: std.ArrayList(u8),
 storedStrings: std.StringArrayHashMapUnmanaged(StoredString),
-slots: std.PriorityDequeue(StorageSlot, void, StorageSlot.order), // NOTE: maybe switch to a soa and implement manually
+slots: std.PriorityDequeue(StorageSlot, void, StorageSlot.orderByLen),
+// NOTE: maybe switch to a soa and implement manually
+//       also store a second list sorted by index to make merging faster
 
 allocator: std.mem.Allocator,
 const Interner = @This();
@@ -141,10 +157,7 @@ fn load(self: *Interner, s: []const u8) !IndexType {
     }
 
     var ittr = self.slots.iterator();
-    std.debug.print("itterating slots\n", .{});
     while (ittr.next()) |slot| {
-        std.debug.print("slot {d}-{d} // {d}\n", .{ @intFromEnum(slot.index), slot.len, s.len });
-        // TODO: make sure this is ascending
         // first match
         if (slot.len < s.len) continue;
         assert(s.len <= slot.len);
@@ -175,7 +188,38 @@ fn load(self: *Interner, s: []const u8) !IndexType {
 }
 
 fn mergeSlots(self: *Interner) void {
-    _ = self;
+    if (self.slots.len == 0) return;
+    // very slow, find a better way
+    // maybe also don't sort every time ?
+    var slots = self.slots.items[0..self.slots.len];
+    std.mem.sortUnstable(StorageSlot, slots, {}, StorageSlot.orderByIdxLt);
+
+    var write_idx: usize = 0;
+    var current = slots[0];
+
+    for (slots[1..]) |next_range| {
+        if (current.end() >= next_range.index.toBase()) {
+            // Merge
+            const new_end = @max(current.end(), next_range.end());
+            current.len = new_end - current.index.toBase();
+            self.slots.len -= 1;
+        } else {
+            // Save current and move to next
+            slots[write_idx] = current;
+            write_idx += 1;
+            current = next_range;
+        }
+    }
+    slots[write_idx] = current;
+    write_idx += 1;
+
+    // merge with end
+    if (current.end() == self.storage.items.len) {
+        self.storage.items.len -= current.len;
+        self.slots.len -= 1;
+    }
+
+    std.mem.sortUnstable(StorageSlot, self.slots.items[0..self.slots.len], {}, StorageSlot.orderByLenLt);
 }
 
 pub const String = packed struct {
@@ -309,8 +353,6 @@ test "reuse" {
     _ = try i.intern("same length s");
 
     try testing.expectEqualStrings("same length sa different second string", i.storage.items);
-
-    std.debug.print("'{s}'\n", .{i.storage.items});
 }
 
 test "holes" {
@@ -366,14 +408,13 @@ test "holes" {
     _ = i.releaseStr(string4);
     // ____fff_____b
     try testing.expectEqual(13, i.storage.items.len);
-    std.debug.print("\neee\n{any}\n{s}\n\n", .{ i.slots.items[0..i.slots.len], i.storage.items });
     try testing.expectEqual(2, i.slots.len);
-    try testing.expectEqualDeep(StorageSlot{ .len = 7, .index = @enumFromInt(7) }, i.slots.peekMax().?);
+    try testing.expectEqualDeep(StorageSlot{ .len = 5, .index = @enumFromInt(7) }, i.slots.peekMax().?);
     try testing.expectEqualDeep(StorageSlot{ .len = 4, .index = @enumFromInt(0) }, i.slots.peekMin().?);
 
     _ = i.releaseStr(string2);
     // ____fff
-    try testing.expectEqual(8, i.storage.items.len);
+    try testing.expectEqual(7, i.storage.items.len);
     try testing.expectEqual(1, i.slots.len);
     try testing.expectEqualDeep(StorageSlot{ .len = 4, .index = @enumFromInt(0) }, i.slots.peekMax().?);
     try testing.expectEqualDeep(StorageSlot{ .len = 4, .index = @enumFromInt(0) }, i.slots.peekMin().?);
