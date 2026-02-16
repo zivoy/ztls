@@ -1,9 +1,9 @@
-// idea store strings in one interned array
-// pass out gstrings for the data
-// will need a custom allocator (?) so that freeing a string will allow its space to be be reused
-// have strings be referenced counted and
-
-// have storage be freelist like, it will free then strings can populate the smallest available slot
+// strings are interned in one big array, so only one call needed to free it
+// the strings are in a gstring like format, but its id based, so there is more space for the prefix
+// short strings are passed on the stack as is
+// strings are referenced counted
+// strings are stored in a freelist like format,
+// free space created by freed strings, will be repopulated, picking the smallest available slot
 
 // NOTE: maybe make a compact function, it will make all strings invalid, but will compact the memory space
 //       or have some stable index system
@@ -54,6 +54,10 @@ const Span = struct {
         return a.index.toBase() < b.index.toBase();
     }
 };
+
+fn getContext(self: *const Interner) InternerContext {
+    return .{ .storage = self.storage.items };
+}
 
 // Context for the HashMap that resolves Indices to Strings via Storage
 const InternerContext = struct {
@@ -120,10 +124,6 @@ pub fn deinit(self: *Interner) void {
     self.storedStrings.deinit(self.gpa);
     self.storage.deinit(self.gpa);
     self.slots.deinit(self.gpa);
-}
-
-fn getContext(self: *const Interner) InternerContext {
-    return .{ .storage = self.storage.items };
 }
 
 pub fn intern(self: *Interner, s: []const u8) !String {
