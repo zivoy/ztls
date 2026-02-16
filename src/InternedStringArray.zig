@@ -20,6 +20,9 @@ const IndexType = enum(u40) {
 };
 const LenType = u32;
 
+// TODO: benchmark for best value
+const defaultSlotMergeThreshold: u16 = 256;
+
 // can this be simplified, do we need all 3 items?
 storage: std.ArrayList(u8),
 // Map: Key(Index, Len) -> Usage(u32)
@@ -28,9 +31,8 @@ slots: std.ArrayList(Span),
 // NOTE: maybe switch to a soa
 //       also store a second list sorted by index to make merging faster
 
-// TODO: benchmark for best value
 /// The amount of holes that are needed to exist before a merge will happen automatically
-slotMergeThreshold: u16 = 256,
+slotMergeThreshold: u16 = defaultSlotMergeThreshold,
 
 allocator: std.mem.Allocator,
 const Interner = @This();
@@ -83,7 +85,7 @@ const InternerContext = struct {
     }
 };
 
-pub fn init(allocator: std.mem.Allocator) Interner {
+pub fn initEmpty(allocator: std.mem.Allocator) Interner {
     return Interner{
         .allocator = allocator,
         .storage = .empty,
@@ -92,7 +94,23 @@ pub fn init(allocator: std.mem.Allocator) Interner {
     };
 }
 
-// TODO: init capacity
+pub fn initCapacity(allocator: std.mem.Allocator, stringCapacity: u40, holeCapacity: u32, hashMapCapacity: u32) !Interner {
+    var interner = initEmpty(allocator);
+
+    try interner.storage.ensureTotalCapacity(allocator, stringCapacity);
+    errdefer interner.storage.deinit(allocator);
+    try interner.slots.ensureTotalCapacity(allocator, holeCapacity);
+    errdefer interner.slots.deinit(allocator);
+    try interner.storedStrings.ensureTotalCapacityContext(allocator, hashMapCapacity, interner.getContext());
+
+    return interner;
+}
+
+pub fn init(allocator: std.mem.Allocator) !Interner {
+    // 4 mb of storage, that can store 1000 strings and have 256 (merge threshold) + 1 holes
+    return initCapacity(allocator, 4 * 1024 * 1024, defaultSlotMergeThreshold + 1, 1000);
+}
+
 // TODO: make more zig like, pass the allocator to anything that will or might allocate?
 
 pub fn deinit(self: *Interner) void {
@@ -375,7 +393,7 @@ fn releaseStr(self: *Interner, str: []const u8) bool {
 }
 
 test "interning" {
-    var i = Interner.init(testing.allocator);
+    var i = try Interner.init(testing.allocator);
     defer i.deinit();
 
     const string1 = try i.intern("some string 1");
@@ -400,7 +418,7 @@ test "interning" {
 }
 
 test "reuse" {
-    var i = Interner.init(testing.allocator);
+    var i = try Interner.init(testing.allocator);
     defer i.deinit();
 
     const string1 = try i.intern("some string 1");
@@ -424,7 +442,7 @@ test "reuse" {
 }
 
 test "holes" {
-    var i = Interner.init(testing.allocator);
+    var i = try Interner.init(testing.allocator);
     defer i.deinit();
 
     const string1 = "aaaaaaaaaaaa";
