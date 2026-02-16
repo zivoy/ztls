@@ -154,8 +154,8 @@ pub fn intern(self: *Interner, s: []const u8) !String {
     } };
 }
 
-pub fn release(self: *Interner, s: *const String) bool {
-    if (s.len <= String.length_max_short) return true;
+pub fn release(self: *Interner, s: String) bool {
+    if (s.isShort()) return true;
 
     return self.releaseKey(.{
         .index = s.payload.interned.index,
@@ -329,10 +329,14 @@ pub const String = packed struct {
         self: *const String,
         interner: *Interner,
     ) void {
-        if (!interner.release(self)) return;
+        if (!interner.release(self.*)) return;
         // make the callers value be undefined, this is only for debugging to help catch use after frees
         var selfNonConst = @constCast(self);
         selfNonConst = undefined;
+    }
+
+    pub fn isShort(self: String) bool {
+        return self.len <= length_max_short;
     }
 
     pub fn eql(
@@ -340,7 +344,7 @@ pub const String = packed struct {
         rhs: String,
     ) bool {
         if (lhs.len != rhs.len) return false;
-        if (lhs.len <= length_max_short) {
+        if (lhs.isShort()) {
             return lhs.payload.content == rhs.payload.content;
         }
         // since the strings are interned, equality is easy
@@ -368,12 +372,12 @@ pub const String = packed struct {
 
     /// get a slice to the string
     pub fn slice(self: *const String, interner: Interner) []const u8 {
-        if (self.len > length_max_short) {
+        if (!self.isShort()) {
             const index: usize = self.payload.interned.index.toBase();
             return interner.storage.items[index .. index + self.len];
         }
 
-        assert(self.len <= length_max_short);
+        assert(self.isShort());
         const payload_ptr = self.getAnyArray("payload");
         return payload_ptr[0..self.len];
     }
@@ -381,7 +385,7 @@ pub const String = packed struct {
     /// get the data immediately available on the stack
     pub fn prefix(self: *const String) []const u8 {
         const payload_ptr = self.getAnyArray("payload");
-        const len = if (self.len > length_max_short) length_prefix_long else self.len;
+        const len = if (self.isShort()) self.len else length_prefix_long;
         return payload_ptr[0..len];
     }
 };
@@ -407,6 +411,7 @@ test "interning" {
 
     try testing.expect(string1.eql(string3));
     try testing.expect(!string1.eql(string2));
+    try testing.expectEqual(.gt, String.order(i, string1, string4));
 
     try testing.expectEqualStrings("some string 1", string1.slice(i));
     try testing.expectEqualStrings("some string 2", string2.slice(i));
@@ -430,7 +435,7 @@ test "reuse" {
 
     try testing.expectEqualStrings("some string 1some string 2", i.storage.items);
 
-    string2.deinit(&i);
+    _ = i.release(string2);
 
     try testing.expectEqualStrings("some string 1", i.storage.items);
 
@@ -438,6 +443,7 @@ test "reuse" {
 
     try testing.expectEqualStrings("some string 1a different second string", i.storage.items);
 
+    // deinit also works, and does not return success bool
     string1.deinit(&i);
 
     _ = try i.intern("same length s");
