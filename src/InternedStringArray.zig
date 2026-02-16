@@ -87,23 +87,31 @@ pub fn release(self: *Interner, s: *const String) bool {
     if (s.len <= String.length_max_short) return true;
 
     const str = s.slice(self.*);
-    std.debug.print("string: '{s}' len: {d}\n", .{ str, str.len });
+    return self.releaseStr(str);
+}
+fn releaseStr(self: *Interner, str: []const u8) bool {
     const usage = self.storedStrings.getPtr(str) orelse return false;
     usage.usage -= 1;
-    std.debug.print("Usage: {d}\n", .{usage.usage});
-    if (usage.usage == 0) {
-        const index: usize = usage.index.toBase();
-        if (!self.storedStrings.swapRemove(str)) return false;
-        @memset(self.storage.items[index .. index + s.len], undefined);
+    if (usage.usage > 0) return true;
 
-        // easy case
-        if (index + s.len == self.storage.items.len) {
-            self.storage.items.len -= s.len;
-            return true;
-        }
+    const index = usage.index;
+    if (!self.storedStrings.swapRemove(str)) return false;
+    @memset(self.storage.items[index.toBase() .. index.toBase() + str.len], undefined);
 
-        // TODO: free from storage
+    defer self.mergeSlots();
+
+    // easy case
+    if (index.toBase() + str.len == self.storage.items.len) {
+        self.storage.items.len -= str.len;
+        return true;
     }
+
+    // NOTE: maybe find an available slot and expand it?
+    self.slots.add(.{
+        .index = index,
+        .len = @truncate(str.len),
+    }) catch return false;
+
     return true;
 }
 
@@ -114,7 +122,9 @@ fn load(self: *Interner, s: []const u8) !IndexType {
         return stored.index;
     }
 
-    // TODO: replace with something that will reuse
+    // const needMore = if (self.slots.peekMax()) |slot| slot.len < s.len else false;
+    // if (needMore) {
+    // no slot is big enough, allocate more
     const idx: IndexType = @enumFromInt(self.storage.items.len);
     try self.storage.appendSlice(self.allocator, s);
     errdefer self.storage.items.len -= s.len;
@@ -125,6 +135,12 @@ fn load(self: *Interner, s: []const u8) !IndexType {
         .usage = 1,
     });
     return idx;
+    // }
+
+}
+
+fn mergeSlots(self: *Interner) void {
+    _ = self;
 }
 
 pub const String = packed struct {
@@ -266,56 +282,71 @@ test "holes" {
     var i = Interner.init(testing.allocator);
     defer i.deinit();
 
-    const string1 = try i.intern("aaaaaaaaaaaa");
-    const string2 = try i.intern("b");
+    const string1 = "aaaaaaaaaaaa";
+    _ = try i.load(string1);
+    const string2 = "b";
+    _ = try i.load(string2);
     // aaaaaaaaaaaab
     try testing.expectEqualStrings("aaaaaaaaaaaab", i.storage.items);
     try testing.expectEqual(null, i.slots.peekMax());
     try testing.expectEqual(null, i.slots.peekMin());
 
-    string1.deinit(&i);
+    _ = i.releaseStr(string1);
     // ____________b
+    std.debug.print("\n\n\neee\n{any}\n\n\n\n\n", .{i.slots.items[0..i.slots.len]});
     try testing.expectEqual(13, i.storage.items.len);
     try testing.expectEqual(1, i.slots.len);
     try testing.expectEqualDeep(StorageSlot{ .len = 12, .index = @enumFromInt(0) }, i.slots.peekMax().?);
     try testing.expectEqualDeep(StorageSlot{ .len = 12, .index = @enumFromInt(0) }, i.slots.peekMin().?);
 
-    const string3 = try i.intern("cccccccc");
-    const string4 = try i.intern("dd");
+    const string3 = "cccccccc";
+    _ = try i.load(string3);
+    const string4 = "dd";
+    _ = try i.load(string4);
     // ccccccccdd__b
     try testing.expectEqual(1, i.slots.len);
     try testing.expectEqualDeep(StorageSlot{ .len = 2, .index = @enumFromInt(10) }, i.slots.peekMax().?);
     try testing.expectEqualDeep(StorageSlot{ .len = 2, .index = @enumFromInt(10) }, i.slots.peekMin().?);
 
-    string3.deinit(&i);
+    _ = i.releaseStr(string3);
     // ________dd__b
     try testing.expectEqual(2, i.slots.len);
     try testing.expectEqualDeep(StorageSlot{ .len = 8, .index = @enumFromInt(0) }, i.slots.peekMax().?);
     try testing.expectEqualDeep(StorageSlot{ .len = 2, .index = @enumFromInt(10) }, i.slots.peekMin().?);
 
-    _ = try i.intern("ffff");
-    const string5 = try i.intern("e");
-    // ffffe___dd__b
+    std.debug.print("\n\nslots: {any}\n\n", .{i.slots.items});
+
+    _ = try i.load("eeee");
+    const string5 = "f";
+    _ = try i.load(string5);
+    // eeeef___dd__b
     try testing.expectEqual(2, i.slots.len);
     try testing.expectEqualDeep(StorageSlot{ .len = 3, .index = @enumFromInt(5) }, i.slots.peekMax().?);
     try testing.expectEqualDeep(StorageSlot{ .len = 2, .index = @enumFromInt(10) }, i.slots.peekMin().?);
 
-    string5.deinit(&i);
-    // ____e___dd__b
+    _ = i.releaseStr(string5);
+    // ____f___dd__b
     try testing.expectEqual(3, i.slots.len);
     try testing.expectEqualDeep(StorageSlot{ .len = 4, .index = @enumFromInt(5) }, i.slots.peekMax().?);
     try testing.expectEqualDeep(StorageSlot{ .len = 2, .index = @enumFromInt(10) }, i.slots.peekMin().?);
 
-    string4.deinit(&i);
-    // ____e_______b
+    _ = i.releaseStr(string4);
+    // ____f_______b
     try testing.expectEqual(13, i.storage.items.len);
     try testing.expectEqual(2, i.slots.len);
     try testing.expectEqualDeep(StorageSlot{ .len = 7, .index = @enumFromInt(5) }, i.slots.peekMax().?);
     try testing.expectEqualDeep(StorageSlot{ .len = 4, .index = @enumFromInt(0) }, i.slots.peekMin().?);
 
-    string2.deinit(&i);
-    // ____e
+    _ = i.releaseStr(string2);
+    // ____f
     try testing.expectEqual(5, i.storage.items.len);
+    try testing.expectEqual(1, i.slots.len);
+    try testing.expectEqualDeep(StorageSlot{ .len = 4, .index = @enumFromInt(0) }, i.slots.peekMax().?);
+    try testing.expectEqualDeep(StorageSlot{ .len = 4, .index = @enumFromInt(0) }, i.slots.peekMin().?);
+
+    _ = try i.load("gggggg");
+    // ____fgggggg
+    try testing.expectEqual(11, i.storage.items.len);
     try testing.expectEqual(1, i.slots.len);
     try testing.expectEqualDeep(StorageSlot{ .len = 4, .index = @enumFromInt(0) }, i.slots.peekMax().?);
     try testing.expectEqualDeep(StorageSlot{ .len = 4, .index = @enumFromInt(0) }, i.slots.peekMin().?);
