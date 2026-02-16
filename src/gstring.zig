@@ -142,10 +142,14 @@ pub fn StringType(comptime T: type) type {
             alloc: std.mem.Allocator,
         ) void {
             var selfNonConst = @constCast(self);
-            if (self.len > length_max_short) alloc.free(self.payload.heap.ptr[0..self.len]);
+            if (!self.isShort()) alloc.free(self.payload.heap.ptr[0..self.len]);
             selfNonConst.len = 0;
             selfNonConst.payload = undefined;
             selfNonConst = undefined;
+        }
+
+        pub fn isShort(self: Self) bool {
+            return self.len <= length_max_short;
         }
 
         pub fn eql(
@@ -155,7 +159,7 @@ pub fn StringType(comptime T: type) type {
             if (lhs.len != rhs.len) return false;
             // TODO: compare prefix by bit offset first for fewer branches
 
-            if (lhs.len <= length_max_short) {
+            if (lhs.isShort()) {
                 return lhs.payload.content == rhs.payload.content;
             }
 
@@ -193,9 +197,9 @@ pub fn StringType(comptime T: type) type {
 
         /// get a slice to the string
         pub fn slice(self: *const Self) []const u8 {
-            if (self.len > length_max_short) return self.payload.heap.ptr[0..self.len];
+            if (!self.isShort()) return self.payload.heap.ptr[0..self.len];
 
-            std.debug.assert(self.len <= length_max_short);
+            std.debug.assert(self.isShort());
             const payload_ptr = self.getAnyArray("payload");
             return payload_ptr[0..self.len];
         }
@@ -203,7 +207,7 @@ pub fn StringType(comptime T: type) type {
         /// get the data immediately available on the stack
         pub fn prefix(self: *const Self) []const u8 {
             const payload_ptr = self.getAnyArray("payload");
-            const len = if (self.len > length_max_short) length_prefix_long else self.len;
+            const len = if (self.isShort()) self.len else length_prefix_long;
             return payload_ptr[0..len];
         }
 
@@ -213,7 +217,7 @@ pub fn StringType(comptime T: type) type {
         /// if used on unmanaged strings, you will need to check if the string was shorter then `length_max_short` and free the original string
         pub fn toArrayList(self: *Self, alloc: std.mem.Allocator) std.mem.Allocator.Error!std.ArrayList(u8) {
             var content = self.slice();
-            if (self.len <= length_max_short) content = try alloc.dupe(u8, content);
+            if (self.isShort()) content = try alloc.dupe(u8, content);
             self.len = 0;
             return .fromOwnedSlice(@constCast(content));
         }
@@ -395,7 +399,7 @@ test "allocation to managed" {
         const string = try String.init(allocator, strSlice);
         defer string.deinit(allocator);
 
-        try std.testing.expect(string.len < String.length_max_short);
+        try std.testing.expect(string.isShort());
     }
 
     {
@@ -405,7 +409,7 @@ test "allocation to managed" {
         const string = try String.init(allocator, strSlice);
         defer string.deinit(allocator);
 
-        try std.testing.expect(string.len >= String.length_max_short);
+        try std.testing.expect(!string.isShort());
     }
 }
 
@@ -417,7 +421,7 @@ test "allocation to unmanaged" {
 
         const string = String.initUnmanaged(strSlice);
 
-        try std.testing.expect(string.len < String.length_max_short);
+        try std.testing.expect(string.isShort());
     }
 
     {
@@ -426,7 +430,7 @@ test "allocation to unmanaged" {
 
         const string = String.initUnmanaged(strSlice);
 
-        try std.testing.expect(string.len >= String.length_max_short);
+        try std.testing.expect(!string.isShort());
     }
 }
 
@@ -439,7 +443,7 @@ test "allocation to adoption" {
         const string = String.initAdopt(allocator, strSlice);
         defer string.deinit(allocator);
 
-        try std.testing.expect(string.len < String.length_max_short);
+        try std.testing.expect(string.isShort());
     }
 
     {
@@ -449,6 +453,6 @@ test "allocation to adoption" {
         const string = String.initAdopt(allocator, strSlice);
         defer string.deinit(allocator);
 
-        try std.testing.expect(string.len >= String.length_max_short);
+        try std.testing.expect(!string.isShort());
     }
 }
