@@ -28,6 +28,10 @@ slots: std.ArrayList(Span),
 // NOTE: maybe switch to a soa
 //       also store a second list sorted by index to make merging faster
 
+// TODO: benchmark for best value
+/// The amount of holes that are needed to exist before a merge will happen automatically
+slotMergeThreshold: u16 = 256,
+
 allocator: std.mem.Allocator,
 const Interner = @This();
 
@@ -151,8 +155,7 @@ fn releaseKey(self: *Interner, key: Span) bool {
 
     @memset(self.storage.items[key.index.toBase()..key.end()], undefined);
 
-    // NOTE: maybe lower this, if 256 is too high
-    defer if (self.slots.items.len > 256) self.mergeSlots();
+    defer if (self.slots.items.len > self.slotMergeThreshold) self.mergeSlots();
 
     // easy case
     const is_at_end = key.end() == self.storage.items.len;
