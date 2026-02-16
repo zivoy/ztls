@@ -25,7 +25,7 @@ const defaultSlotMergeThreshold: u16 = 256;
 
 // can this be simplified, do we need all 3 items?
 storage: std.ArrayList(u8),
-// Map: Key(Index, Len) -> Usage(u32)
+// Map: Span(Index, Len) -> Usage(u32)
 storedStrings: std.HashMapUnmanaged(Span, u32, InternerContext, 80),
 slots: std.ArrayList(Span),
 // NOTE: maybe switch to a soa
@@ -38,7 +38,7 @@ gpa: std.mem.Allocator,
 const Interner = @This();
 
 // Key for the HashMap (Index + Length)
-// This is also used for the StorageSlot
+// This is also used for the free slots
 const Span = struct {
     index: IndexType,
     len: LenType,
