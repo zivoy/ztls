@@ -111,6 +111,12 @@ pub fn ensureTotalCapacity(self: *Interner, stringCapacity: u40, holeCapacity: u
     try self.storedStrings.ensureTotalCapacityContext(self.gpa, hashMapCapacity, self.getContext());
 }
 
+pub fn ensureUnusedCapacity(self: *Interner, stringCapacity: u40, holeCapacity: u32, hashMapCapacity: u32) !void {
+    try self.storage.ensureUnusedCapacity(self.gpa, stringCapacity);
+    try self.slots.ensureUnusedCapacity(self.gpa, holeCapacity);
+    try self.storedStrings.ensureUnusedCapacityContext(self.gpa, hashMapCapacity, self.getContext());
+}
+
 pub fn deinit(self: *Interner) void {
     self.storedStrings.deinit(self.gpa);
     self.storage.deinit(self.gpa);
