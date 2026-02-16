@@ -29,6 +29,7 @@ storedStrings: std.HashMapUnmanaged(Span, u32, InternerContext, 80),
 slots: std.ArrayList(Span),
 // NOTE: maybe switch to a soa
 //       also store a second list sorted by index to make merging faster
+// NOTE: another potential optimization is to drop the slots lists and use an ArrayHashMap, it will make inserts slower though
 
 /// The amount of holes that are needed to exist before a merge will happen automatically
 slotMergeThreshold: u16 = defaultSlotMergeThreshold,
