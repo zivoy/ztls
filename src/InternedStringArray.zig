@@ -209,6 +209,7 @@ fn load(self: *Interner, s: []const u8) !IndexType {
     const needMoreSpace = if (self.peekMaxSlot()) |slot| slot.len < s.len else true;
     if (needMoreSpace) {
         // append to the end
+        if (self.storage.items.len + s.len > std.math.maxInt(u40)) return error.OutOfMemory;
         idx = @enumFromInt(self.storage.items.len);
         try self.storage.appendSlice(self.gpa, s);
     } else {
