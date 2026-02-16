@@ -23,7 +23,6 @@ const LenType = u32;
 // TODO: benchmark for best value
 const defaultSlotMergeThreshold: u16 = 256;
 
-// can this be simplified, do we need all 3 items?
 storage: std.ArrayList(u8),
 // Map: Span(Index, Len) -> Usage(u32)
 storedStrings: std.HashMapUnmanaged(Span, u32, InternerContext, 80),
@@ -500,6 +499,15 @@ test "holes" {
     try testing.expectEqualDeep(Span{ .len = 4, .index = @enumFromInt(0) }, i.peekMaxSlot().?);
     try testing.expectEqualDeep(Span{ .len = 1, .index = @enumFromInt(7) }, i.peekMinSlot().?);
 
+    const string6 = "g";
+    _ = try i.load(string6);
+    // ____fffgdd__b
+    try testing.expectEqual(2, i.slots.items.len);
+    try testing.expectEqualDeep(Span{ .len = 4, .index = @enumFromInt(0) }, i.peekMaxSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 2, .index = @enumFromInt(10) }, i.peekMinSlot().?);
+
+    _ = i.releaseStr(string6);
+
     _ = i.releaseStr(string4);
     i.mergeSlots();
     // ____fff_____b
@@ -516,8 +524,8 @@ test "holes" {
     try testing.expectEqualDeep(Span{ .len = 4, .index = @enumFromInt(0) }, i.peekMaxSlot().?);
     try testing.expectEqualDeep(Span{ .len = 4, .index = @enumFromInt(0) }, i.peekMinSlot().?);
 
-    _ = try i.load("gggggg");
-    // ____fffgggggg
+    _ = try i.load("hhhhhh");
+    // ____fffhhhhhh
     try testing.expectEqual(13, i.storage.items.len);
     try testing.expectEqual(1, i.slots.items.len);
     try testing.expectEqualDeep(Span{ .len = 4, .index = @enumFromInt(0) }, i.peekMaxSlot().?);
