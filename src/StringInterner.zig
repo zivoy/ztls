@@ -538,3 +538,19 @@ test "holes" {
     try testing.expectEqualDeep(Span{ .len = 4, .index = @enumFromInt(0) }, i.peekMaxSlot().?);
     try testing.expectEqualDeep(Span{ .len = 4, .index = @enumFromInt(0) }, i.peekMinSlot().?);
 }
+
+fn testStringIsEql(s: String, r: []const u8) !void {
+    const s1 = s.prefix();
+    return std.testing.expectEqualStrings(r, s1);
+}
+
+test "equal function" {
+    var i = try Interner.init(testing.allocator);
+    defer i.deinit();
+
+    const string = try i.intern("some string");
+    try testStringIsEql(string, "some string");
+
+    const string2 = try i.intern("str");
+    try testStringIsEql(string2, "str");
+}

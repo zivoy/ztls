@@ -455,3 +455,14 @@ test "allocation to adoption" {
         try std.testing.expect(!string.isShort());
     }
 }
+
+fn testStringIsEql(s: String, r: []const u8) !void {
+    const s1 = s.prefix();
+    return std.testing.expectEqualStrings(r, s1);
+}
+
+test "equal function" {
+    const string = try String.init(std.testing.allocator, "some string");
+    defer string.deinit(std.testing.allocator);
+    try testStringIsEql(string, "some string");
+}
