@@ -152,12 +152,18 @@ pub fn StringType(comptime T: type) type {
         }
 
         pub fn eql(self: Self, b: anytype) bool {
-            return switch (@TypeOf(b)) {
-                *const Self => self.eqlStrings(b.*),
-                Self => self.eqlStrings(b),
-                []const u8 => std.mem.eql(u8, self.slice(), b),
+            switch (@TypeOf(b)) {
+                *const Self => return self.eqlStrings(b.*),
+                Self => return self.eqlStrings(b),
+                []const u8 => {
+                    if (self.len != b.len) return false;
+                    // do an extra check for longer strings, for exit early
+                    if (!self.isShort() and !std.mem.eql(u8, self.prefix(), b[0..length_prefix_long])) return false;
+                    return std.mem.eql(u8, self.slice(), b);
+                },
                 else => @compileError("String.eql: Unsupported type for B '" ++ @typeName(@TypeOf(b)) ++ "'"),
-            };
+            }
+            unreachable;
         }
 
         pub fn eqlStrings(
