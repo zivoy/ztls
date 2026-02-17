@@ -1,7 +1,7 @@
 .{
-    .name = .utils,
-    .version = "0.0.0",
-    .fingerprint = 0x540f5beb1c3c6b82,
+    .name = .ztls,
+    .version = "1.0.0",
+    .fingerprint = 0x767a5b45e2de2c6b,
     .minimum_zig_version = "0.15.2",
     .dependencies = .{},
     .paths = .{
