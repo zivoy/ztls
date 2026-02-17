@@ -151,10 +151,10 @@ pub fn StringType(comptime T: type) type {
             return self.len <= length_max_short;
         }
 
-        pub fn eql(self: Self, b: anytype) bool {
+        pub fn eqlAny(self: Self, b: anytype) bool {
             switch (@TypeOf(b)) {
-                *const Self => return self.eqlStrings(b.*),
-                Self => return self.eqlStrings(b),
+                *const Self => return self.eql(b.*),
+                Self => return self.eql(b),
                 []const u8 => {
                     if (self.len != b.len) return false;
                     // do an extra check for longer strings, for exit early
@@ -166,7 +166,7 @@ pub fn StringType(comptime T: type) type {
             unreachable;
         }
 
-        pub fn eqlStrings(
+        pub fn eql(
             lhs: Self,
             rhs: Self,
         ) bool {
@@ -188,7 +188,7 @@ pub fn StringType(comptime T: type) type {
             );
         }
 
-        pub fn order(a: anytype, b: anytype) std.math.Order {
+        pub fn orderAny(a: anytype, b: anytype) std.math.Order {
             const sa = switch (@TypeOf(a)) {
                 *const Self => a.*,
                 Self => a,
@@ -201,10 +201,10 @@ pub fn StringType(comptime T: type) type {
                 []const u8 => initUnmanaged(b),
                 else => @compileError("String.Order: Unsupported type for B '" ++ @typeName(@TypeOf(b)) ++ "'"),
             };
-            return orderStrings(sa, sb);
+            return order(sa, sb);
         }
 
-        pub fn orderStrings(lhs: Self, rhs: Self) std.math.Order {
+        pub fn order(lhs: Self, rhs: Self) std.math.Order {
             // check the first 4 bytes that always are present
             const lhs_prefix = lhs.getAnyArray("payload")[0..length_prefix_long];
             const rhs_prefix = rhs.getAnyArray("payload")[0..length_prefix_long];
@@ -506,9 +506,9 @@ test "compare vs string" {
     const str2 = try String.init(allocator, "a short string");
     defer str2.deinit(allocator);
 
-    try std.testing.expect(str.eql(string));
-    try std.testing.expect(!str.eql(str2));
-    try std.testing.expect(!str2.eql(@as([]const u8, "something")));
+    try std.testing.expect(str.eqlAny(string));
+    try std.testing.expect(!str.eqlAny(str2));
+    try std.testing.expect(!str2.eqlAny(@as([]const u8, "something")));
 }
 
 test "order vs string" {
@@ -519,7 +519,7 @@ test "order vs string" {
     const str2 = try String.init(allocator, "a short string");
     defer str2.deinit(allocator);
 
-    try std.testing.expectEqual(.eq, str.order(string));
-    try std.testing.expectEqual(.gt, str.order(str2));
-    try std.testing.expectEqual(.lt, str2.order(@as([]const u8, "something")));
+    try std.testing.expectEqual(.eq, str.orderAny(string));
+    try std.testing.expectEqual(.gt, str.orderAny(str2));
+    try std.testing.expectEqual(.lt, str2.orderAny(@as([]const u8, "something")));
 }
