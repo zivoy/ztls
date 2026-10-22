@@ -34,8 +34,13 @@ slots: std.ArrayList(Span),
 /// The amount of holes that are needed to exist before a merge will happen automatically
 slotMergeThreshold: u16 = defaultSlotMergeThreshold,
 
-gpa: std.mem.Allocator,
 const Interner = @This();
+
+pub const empty: Interner = .{
+    .storage = .empty,
+    .storedStrings = .empty,
+    .slots = .empty,
+};
 
 // Key for the HashMap (Index + Length)
 // This is also used for the free slots
@@ -89,18 +94,9 @@ const InternerContext = struct {
     }
 };
 
-pub fn initEmpty(gpa: std.mem.Allocator) Interner {
-    return Interner{
-        .gpa = gpa,
-        .storage = .empty,
-        .storedStrings = .empty,
-        .slots = .empty,
-    };
-}
-
 pub fn initCapacity(gpa: std.mem.Allocator, stringCapacity: u40, holeCapacity: u32, hashMapCapacity: u32) !Interner {
-    var interner = initEmpty(gpa);
-    try interner.ensureTotalCapacity(stringCapacity, holeCapacity, hashMapCapacity);
+    var interner = Interner.empty;
+    try interner.ensureTotalCapacity(gpa, stringCapacity, holeCapacity, hashMapCapacity);
     return interner;
 }
 
@@ -109,25 +105,25 @@ pub fn init(gpa: std.mem.Allocator) !Interner {
     return initCapacity(gpa, 4 * 1024 * 1024, defaultSlotMergeThreshold + 1, 1000);
 }
 
-pub fn ensureTotalCapacity(self: *Interner, stringCapacity: u40, holeCapacity: u32, hashMapCapacity: u32) !void {
-    try self.storage.ensureTotalCapacity(self.gpa, stringCapacity);
-    try self.slots.ensureTotalCapacity(self.gpa, holeCapacity);
-    try self.storedStrings.ensureTotalCapacityContext(self.gpa, hashMapCapacity, self.getContext());
+pub fn ensureTotalCapacity(self: *Interner, gpa: std.mem.Allocator, stringCapacity: u40, holeCapacity: u32, hashMapCapacity: u32) !void {
+    try self.storage.ensureTotalCapacity(gpa, stringCapacity);
+    try self.slots.ensureTotalCapacity(gpa, holeCapacity);
+    try self.storedStrings.ensureTotalCapacityContext(gpa, hashMapCapacity, self.getContext());
 }
 
-pub fn ensureUnusedCapacity(self: *Interner, stringCapacity: u40, holeCapacity: u32, hashMapCapacity: u32) !void {
-    try self.storage.ensureUnusedCapacity(self.gpa, stringCapacity);
-    try self.slots.ensureUnusedCapacity(self.gpa, holeCapacity);
-    try self.storedStrings.ensureUnusedCapacityContext(self.gpa, hashMapCapacity, self.getContext());
+pub fn ensureUnusedCapacity(self: *Interner, gpa: std.mem.Allocator, stringCapacity: u40, holeCapacity: u32, hashMapCapacity: u32) !void {
+    try self.storage.ensureUnusedCapacity(gpa, stringCapacity);
+    try self.slots.ensureUnusedCapacity(gpa, holeCapacity);
+    try self.storedStrings.ensureUnusedCapacityContext(gpa, hashMapCapacity, self.getContext());
 }
 
-pub fn deinit(self: *Interner) void {
-    self.storedStrings.deinit(self.gpa);
-    self.storage.deinit(self.gpa);
-    self.slots.deinit(self.gpa);
+pub fn deinit(self: *Interner, gpa: std.mem.Allocator) void {
+    self.storedStrings.deinit(gpa);
+    self.storage.deinit(gpa);
+    self.slots.deinit(gpa);
 }
 
-pub fn intern(self: *Interner, s: []const u8) !String {
+pub fn intern(self: *Interner, gpa: std.mem.Allocator, s: []const u8) !String {
     assert(s.len <= String.length_max_long);
     const len: LenType = @truncate(s.len);
     if (len <= String.length_max_short) {
@@ -145,7 +141,7 @@ pub fn intern(self: *Interner, s: []const u8) !String {
     @memcpy(&prefixArr, s[0..String.length_prefix_long]);
 
     // intern string
-    const index = try self.load(s);
+    const index = try self.load(gpa, s);
 
     return .{ .len = len, .payload = .{
         .interned = .{
@@ -155,16 +151,16 @@ pub fn intern(self: *Interner, s: []const u8) !String {
     } };
 }
 
-pub fn release(self: *Interner, s: String) bool {
+pub fn release(self: *Interner, gpa: std.mem.Allocator, s: String) bool {
     if (s.isShort()) return true;
 
-    return self.releaseKey(.{
+    return self.releaseKey(gpa, .{
         .index = s.payload.interned.index,
         .len = s.len,
     });
 }
 
-fn releaseKey(self: *Interner, key: Span) bool {
+fn releaseKey(self: *Interner, gpa: std.mem.Allocator, key: Span) bool {
     const ctx = self.getContext();
     const usage = self.storedStrings.getPtrContext(key, ctx) orelse return false;
     usage.* -= 1;
@@ -187,7 +183,7 @@ fn releaseKey(self: *Interner, key: Span) bool {
     }
 
     // Best effort slot creation
-    if (self.slots.ensureUnusedCapacity(self.gpa, 1)) {
+    if (self.slots.ensureUnusedCapacity(gpa, 1)) {
         const el = self.slots.addOneAssumeCapacity();
         el.index = key.index;
         el.len = key.len;
@@ -200,10 +196,10 @@ fn releaseKey(self: *Interner, key: Span) bool {
     return true;
 }
 
-fn load(self: *Interner, s: []const u8) !IndexType {
+fn load(self: *Interner, gpa: std.mem.Allocator, s: []const u8) !IndexType {
     // get existing
     const ctx = self.getContext();
-    const result = try self.storedStrings.getOrPutContextAdapted(self.gpa, s, ctx, ctx);
+    const result = try self.storedStrings.getOrPutContextAdapted(gpa, s, ctx, ctx);
     if (result.found_existing) {
         result.value_ptr.* += 1;
         return result.key_ptr.index;
@@ -217,7 +213,7 @@ fn load(self: *Interner, s: []const u8) !IndexType {
         // append to the end
         if (self.storage.items.len + s.len > std.math.maxInt(u40)) return error.OutOfMemory;
         idx = @fromBackingInt(@intCast(self.storage.items.len));
-        try self.storage.appendSlice(self.gpa, s);
+        try self.storage.appendSlice(gpa, s);
     } else {
         // there _will_ be a slot with space to hold the string
         var found_slot_index: usize = undefined;
@@ -328,9 +324,10 @@ pub const String = packed struct {
 
     pub fn deinit(
         self: *const String,
+        gpa: std.mem.Allocator,
         interner: *Interner,
     ) void {
-        if (!interner.release(self.*)) return;
+        if (!interner.release(gpa, self.*)) return;
         // make the callers value be undefined, this is only for debugging to help catch use after frees
         var selfNonConst = @constCast(self);
         selfNonConst = undefined;
@@ -393,22 +390,23 @@ pub const String = packed struct {
 
 const testing = std.testing;
 
-fn releaseStr(self: *Interner, str: []const u8) bool {
+fn releaseStr(self: *Interner, gpa: std.mem.Allocator, str: []const u8) bool {
     const ctx = self.getContext();
     const entry = self.storedStrings.getEntryAdapted(str, ctx) orelse return false;
     // Entry key_ptr points to the Key stored in the map
     const key = entry.key_ptr.*;
-    return self.releaseKey(key);
+    return self.releaseKey(gpa, key);
 }
 
 test "interning" {
-    var i = try Interner.init(testing.allocator);
-    defer i.deinit();
+    const gpa = testing.allocator;
+    var i = try Interner.init(gpa);
+    defer i.deinit(gpa);
 
-    const string1 = try i.intern("some string 1");
-    const string2 = try i.intern("some string 2");
-    const string3 = try i.intern("some string 1");
-    const string4 = try i.intern("short");
+    const string1 = try i.intern(gpa, "some string 1");
+    const string2 = try i.intern(gpa, "some string 2");
+    const string3 = try i.intern(gpa, "some string 1");
+    const string4 = try i.intern(gpa, "short");
 
     try testing.expect(string1.eql(string3));
     try testing.expect(!string1.eql(string2));
@@ -428,44 +426,46 @@ test "interning" {
 }
 
 test "reuse" {
-    var i = try Interner.init(testing.allocator);
-    defer i.deinit();
+    const gpa = testing.allocator;
+    var i = try Interner.init(gpa);
+    defer i.deinit(gpa);
 
-    const string1 = try i.intern("some string 1");
-    const string2 = try i.intern("some string 2");
+    const string1 = try i.intern(gpa, "some string 1");
+    const string2 = try i.intern(gpa, "some string 2");
 
     try testing.expectEqualStrings("some string 1some string 2", i.storage.items);
 
-    _ = i.release(string2);
+    _ = i.release(gpa, string2);
 
     try testing.expectEqualStrings("some string 1", i.storage.items);
 
-    _ = try i.intern("a different second string");
+    _ = try i.intern(gpa, "a different second string");
 
     try testing.expectEqualStrings("some string 1a different second string", i.storage.items);
 
     // deinit also works, and does not return success bool
-    string1.deinit(&i);
+    string1.deinit(gpa, &i);
 
-    _ = try i.intern("same length s");
+    _ = try i.intern(gpa, "same length s");
 
     try testing.expectEqualStrings("same length sa different second string", i.storage.items);
 }
 
 test "holes" {
-    var i = try Interner.init(testing.allocator);
-    defer i.deinit();
+    const gpa = testing.allocator;
+    var i = try Interner.init(gpa);
+    defer i.deinit(gpa);
 
     const string1 = "aaaaaaaaaaaa";
-    _ = try i.load(string1);
+    _ = try i.load(gpa, string1);
     const string2 = "b";
-    _ = try i.load(string2);
+    _ = try i.load(gpa, string2);
     // aaaaaaaaaaaab
     try testing.expectEqualStrings("aaaaaaaaaaaab", i.storage.items);
     try testing.expectEqual(null, i.peekMaxSlot());
     try testing.expectEqual(null, i.peekMinSlot());
 
-    _ = i.releaseStr(string1);
+    _ = i.releaseStr(gpa, string1);
     i.mergeSlots();
     // ____________b
 
@@ -475,15 +475,15 @@ test "holes" {
     try testing.expectEqualDeep(Span{ .len = 12, .index = @fromBackingInt(@intCast(0)) }, i.peekMinSlot().?);
 
     const string3 = "cccccccc";
-    _ = try i.load(string3);
+    _ = try i.load(gpa, string3);
     const string4 = "dd";
-    _ = try i.load(string4);
+    _ = try i.load(gpa, string4);
     // ccccccccdd__b
     try testing.expectEqual(1, i.slots.items.len);
     try testing.expectEqualDeep(Span{ .len = 2, .index = @fromBackingInt(@intCast(10)) }, i.peekMaxSlot().?);
     try testing.expectEqualDeep(Span{ .len = 2, .index = @fromBackingInt(@intCast(10)) }, i.peekMinSlot().?);
 
-    _ = i.releaseStr(string3);
+    _ = i.releaseStr(gpa, string3);
     i.mergeSlots();
     // ________dd__b
     try testing.expectEqual(2, i.slots.items.len);
@@ -491,15 +491,15 @@ test "holes" {
     try testing.expectEqualDeep(Span{ .len = 2, .index = @fromBackingInt(@intCast(10)) }, i.peekMinSlot().?);
 
     const string5 = "eeee";
-    _ = try i.load(string5);
+    _ = try i.load(gpa, string5);
 
-    _ = try i.load("fff");
+    _ = try i.load(gpa, "fff");
     // eeeefff_dd__b
     try testing.expectEqual(2, i.slots.items.len);
     try testing.expectEqualDeep(Span{ .len = 2, .index = @fromBackingInt(@intCast(10)) }, i.peekMaxSlot().?);
     try testing.expectEqualDeep(Span{ .len = 1, .index = @fromBackingInt(@intCast(7)) }, i.peekMinSlot().?);
 
-    _ = i.releaseStr(string5);
+    _ = i.releaseStr(gpa, string5);
     i.mergeSlots();
     // ____fff_dd__b
     try testing.expectEqual(3, i.slots.items.len);
@@ -507,15 +507,15 @@ test "holes" {
     try testing.expectEqualDeep(Span{ .len = 1, .index = @fromBackingInt(@intCast(7)) }, i.peekMinSlot().?);
 
     const string6 = "g";
-    _ = try i.load(string6);
+    _ = try i.load(gpa, string6);
     // ____fffgdd__b
     try testing.expectEqual(2, i.slots.items.len);
     try testing.expectEqualDeep(Span{ .len = 4, .index = @fromBackingInt(@intCast(0)) }, i.peekMaxSlot().?);
     try testing.expectEqualDeep(Span{ .len = 2, .index = @fromBackingInt(@intCast(10)) }, i.peekMinSlot().?);
 
-    _ = i.releaseStr(string6);
+    _ = i.releaseStr(gpa, string6);
 
-    _ = i.releaseStr(string4);
+    _ = i.releaseStr(gpa, string4);
     i.mergeSlots();
     // ____fff_____b
     try testing.expectEqual(13, i.storage.items.len);
@@ -523,7 +523,7 @@ test "holes" {
     try testing.expectEqualDeep(Span{ .len = 5, .index = @fromBackingInt(@intCast(7)) }, i.peekMaxSlot().?);
     try testing.expectEqualDeep(Span{ .len = 4, .index = @fromBackingInt(@intCast(0)) }, i.peekMinSlot().?);
 
-    _ = i.releaseStr(string2);
+    _ = i.releaseStr(gpa, string2);
     i.mergeSlots();
     // ____fff
     try testing.expectEqual(7, i.storage.items.len);
@@ -531,7 +531,7 @@ test "holes" {
     try testing.expectEqualDeep(Span{ .len = 4, .index = @fromBackingInt(@intCast(0)) }, i.peekMaxSlot().?);
     try testing.expectEqualDeep(Span{ .len = 4, .index = @fromBackingInt(@intCast(0)) }, i.peekMinSlot().?);
 
-    _ = try i.load("hhhhhh");
+    _ = try i.load(gpa, "hhhhhh");
     // ____fffhhhhhh
     try testing.expectEqual(13, i.storage.items.len);
     try testing.expectEqual(1, i.slots.items.len);
@@ -545,12 +545,13 @@ fn testStringIsEql(s: String, r: []const u8) !void {
 }
 
 test "equal function" {
-    var i = try Interner.init(testing.allocator);
-    defer i.deinit();
+    const gpa = testing.allocator;
+    var i = try Interner.init(gpa);
+    defer i.deinit(gpa);
 
-    const string = try i.intern("some string");
+    const string = try i.intern(gpa, "some string");
     try testStringIsEql(string, "some string");
 
-    const string2 = try i.intern("str");
+    const string2 = try i.intern(gpa, "str");
     try testStringIsEql(string2, "str");
 }
