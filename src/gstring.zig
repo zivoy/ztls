@@ -18,7 +18,7 @@ const builtin = @import("builtin");
 
 // usize works just as well
 // pub const String = StringType(usize);
-pub const String = StringType(std.meta.Int(.unsigned, builtin.target.ptrBitWidth()));
+pub const String = StringType(@Int(.unsigned, builtin.target.ptrBitWidth()));
 
 pub fn StringType(comptime T: type) type {
     switch (@typeInfo(T)) {
@@ -34,13 +34,13 @@ pub fn StringType(comptime T: type) type {
     // a strings length is 2 usizes long, so a length of string is half of a pointer
     // on a 64 bit arch its half of a 8 bytes (64 bits) so its 4 bytes or a u32
     const containerSize = @divExact(@bitSizeOf(T), std.mem.byte_size_in_bits);
-    const LenType = std.meta.Int(.unsigned, @divExact(@bitSizeOf(T), 2));
+    const LenType = @Int(.unsigned, @divExact(@bitSizeOf(T), 2));
     // on a 64 bit arch, this will result in 12 (bytes)
     const restSize = (2 * containerSize) - @divExact(@bitSizeOf(LenType), std.mem.byte_size_in_bits);
     const prefixLength = restSize - containerSize;
 
-    const BufferType = std.meta.Int(.unsigned, restSize * std.mem.byte_size_in_bits);
-    const PrefixType = std.meta.Int(.unsigned, prefixLength * std.mem.byte_size_in_bits);
+    const BufferType = @Int(.unsigned, restSize * std.mem.byte_size_in_bits);
+    const PrefixType = @Int(.unsigned, prefixLength * std.mem.byte_size_in_bits);
 
     return packed struct {
         const Self = @This();
@@ -62,7 +62,7 @@ pub fn StringType(comptime T: type) type {
         len: LenType,
         payload: packed union {
             content: BufferType,
-            heap: packed struct { prefix: PrefixType, ptr: [*]const u8 },
+            heap: packed struct { prefix: PrefixType, ptr: usize },
         },
 
         pub fn format(
@@ -92,7 +92,7 @@ pub fn StringType(comptime T: type) type {
                 return .{ .len = len, .payload = .{
                     .heap = .{
                         .prefix = std.mem.bytesToValue(PrefixType, &prefixArr),
-                        .ptr = s.ptr,
+                        .ptr = @intFromPtr(s.ptr),
                     },
                 } };
             }
@@ -141,10 +141,14 @@ pub fn StringType(comptime T: type) type {
             alloc: std.mem.Allocator,
         ) void {
             var selfNonConst = @constCast(self);
-            if (!self.isShort()) alloc.free(self.payload.heap.ptr[0..self.len]);
+            if (!self.isShort()) alloc.free(self.heapPtr()[0..self.len]);
             selfNonConst.len = 0;
             selfNonConst.payload = undefined;
             selfNonConst = undefined;
+        }
+
+        inline fn heapPtr(self: Self) [*]const u8 {
+            return @ptrFromInt(self.payload.heap.ptr);
         }
 
         pub fn isShort(self: Self) bool {
@@ -183,8 +187,8 @@ pub fn StringType(comptime T: type) type {
             const len = lhs.len;
             return std.mem.eql(
                 u8,
-                lhs.payload.heap.ptr[0..len],
-                rhs.payload.heap.ptr[0..len],
+                lhs.heapPtr()[0..len],
+                rhs.heapPtr()[0..len],
             );
         }
 
@@ -227,7 +231,7 @@ pub fn StringType(comptime T: type) type {
 
         /// get a slice to the string
         pub fn slice(self: *const Self) []const u8 {
-            if (!self.isShort()) return self.payload.heap.ptr[0..self.len];
+            if (!self.isShort()) return self.heapPtr()[0..self.len];
 
             std.debug.assert(self.isShort());
             const payload_ptr = self.getAnyArray("payload");

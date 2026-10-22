@@ -15,7 +15,7 @@ const assert = std.debug.assert;
 const IndexType = enum(u40) {
     _,
     pub inline fn toBase(self: IndexType) usize {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 };
 const LenType = u32;
@@ -216,7 +216,7 @@ fn load(self: *Interner, s: []const u8) !IndexType {
     if (needMoreSpace) {
         // append to the end
         if (self.storage.items.len + s.len > std.math.maxInt(u40)) return error.OutOfMemory;
-        idx = @enumFromInt(self.storage.items.len);
+        idx = @fromBackingInt(@intCast(self.storage.items.len));
         try self.storage.appendSlice(self.gpa, s);
     } else {
         // there _will_ be a slot with space to hold the string
@@ -242,7 +242,7 @@ fn load(self: *Interner, s: []const u8) !IndexType {
         if (s.len == slot_entry.len) {
             _ = self.slots.orderedRemove(found_slot_index);
         } else {
-            self.slots.items[found_slot_index].index = @enumFromInt(@intFromEnum(slot_entry.index) + s.len);
+            self.slots.items[found_slot_index].index = @fromBackingInt(@intCast(@backingInt(slot_entry.index) + s.len));
             self.slots.items[found_slot_index].len = slot_entry.len - @as(LenType, @truncate(s.len));
             // since the hole shrunk, we only have to sort the items that are below it
             std.mem.sortUnstable(Span, self.slots.items[0 .. found_slot_index + 1], {}, Span.orderByLenLt);
@@ -306,8 +306,8 @@ pub const String = packed struct {
     const restSize = (2 * containerSize) - @sizeOf(LenType);
     const prefixLength = restSize - (@bitSizeOf(IndexType) / 8);
 
-    const BufferType = std.meta.Int(.unsigned, restSize * 8);
-    const PrefixType = std.meta.Int(.unsigned, prefixLength * 8);
+    const BufferType = @Int(.unsigned, restSize * 8);
+    const PrefixType = @Int(.unsigned, prefixLength * 8);
 
     pub const length_max_long = std.math.maxInt(LenType);
     pub const length_prefix_long = prefixLength;
@@ -471,8 +471,8 @@ test "holes" {
 
     try testing.expectEqual(13, i.storage.items.len);
     try testing.expectEqual(1, i.slots.items.len);
-    try testing.expectEqualDeep(Span{ .len = 12, .index = @enumFromInt(0) }, i.peekMaxSlot().?);
-    try testing.expectEqualDeep(Span{ .len = 12, .index = @enumFromInt(0) }, i.peekMinSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 12, .index = @fromBackingInt(@intCast(0)) }, i.peekMaxSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 12, .index = @fromBackingInt(@intCast(0)) }, i.peekMinSlot().?);
 
     const string3 = "cccccccc";
     _ = try i.load(string3);
@@ -480,15 +480,15 @@ test "holes" {
     _ = try i.load(string4);
     // ccccccccdd__b
     try testing.expectEqual(1, i.slots.items.len);
-    try testing.expectEqualDeep(Span{ .len = 2, .index = @enumFromInt(10) }, i.peekMaxSlot().?);
-    try testing.expectEqualDeep(Span{ .len = 2, .index = @enumFromInt(10) }, i.peekMinSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 2, .index = @fromBackingInt(@intCast(10)) }, i.peekMaxSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 2, .index = @fromBackingInt(@intCast(10)) }, i.peekMinSlot().?);
 
     _ = i.releaseStr(string3);
     i.mergeSlots();
     // ________dd__b
     try testing.expectEqual(2, i.slots.items.len);
-    try testing.expectEqualDeep(Span{ .len = 8, .index = @enumFromInt(0) }, i.peekMaxSlot().?);
-    try testing.expectEqualDeep(Span{ .len = 2, .index = @enumFromInt(10) }, i.peekMinSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 8, .index = @fromBackingInt(@intCast(0)) }, i.peekMaxSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 2, .index = @fromBackingInt(@intCast(10)) }, i.peekMinSlot().?);
 
     const string5 = "eeee";
     _ = try i.load(string5);
@@ -496,22 +496,22 @@ test "holes" {
     _ = try i.load("fff");
     // eeeefff_dd__b
     try testing.expectEqual(2, i.slots.items.len);
-    try testing.expectEqualDeep(Span{ .len = 2, .index = @enumFromInt(10) }, i.peekMaxSlot().?);
-    try testing.expectEqualDeep(Span{ .len = 1, .index = @enumFromInt(7) }, i.peekMinSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 2, .index = @fromBackingInt(@intCast(10)) }, i.peekMaxSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 1, .index = @fromBackingInt(@intCast(7)) }, i.peekMinSlot().?);
 
     _ = i.releaseStr(string5);
     i.mergeSlots();
     // ____fff_dd__b
     try testing.expectEqual(3, i.slots.items.len);
-    try testing.expectEqualDeep(Span{ .len = 4, .index = @enumFromInt(0) }, i.peekMaxSlot().?);
-    try testing.expectEqualDeep(Span{ .len = 1, .index = @enumFromInt(7) }, i.peekMinSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 4, .index = @fromBackingInt(@intCast(0)) }, i.peekMaxSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 1, .index = @fromBackingInt(@intCast(7)) }, i.peekMinSlot().?);
 
     const string6 = "g";
     _ = try i.load(string6);
     // ____fffgdd__b
     try testing.expectEqual(2, i.slots.items.len);
-    try testing.expectEqualDeep(Span{ .len = 4, .index = @enumFromInt(0) }, i.peekMaxSlot().?);
-    try testing.expectEqualDeep(Span{ .len = 2, .index = @enumFromInt(10) }, i.peekMinSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 4, .index = @fromBackingInt(@intCast(0)) }, i.peekMaxSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 2, .index = @fromBackingInt(@intCast(10)) }, i.peekMinSlot().?);
 
     _ = i.releaseStr(string6);
 
@@ -520,23 +520,23 @@ test "holes" {
     // ____fff_____b
     try testing.expectEqual(13, i.storage.items.len);
     try testing.expectEqual(2, i.slots.items.len);
-    try testing.expectEqualDeep(Span{ .len = 5, .index = @enumFromInt(7) }, i.peekMaxSlot().?);
-    try testing.expectEqualDeep(Span{ .len = 4, .index = @enumFromInt(0) }, i.peekMinSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 5, .index = @fromBackingInt(@intCast(7)) }, i.peekMaxSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 4, .index = @fromBackingInt(@intCast(0)) }, i.peekMinSlot().?);
 
     _ = i.releaseStr(string2);
     i.mergeSlots();
     // ____fff
     try testing.expectEqual(7, i.storage.items.len);
     try testing.expectEqual(1, i.slots.items.len);
-    try testing.expectEqualDeep(Span{ .len = 4, .index = @enumFromInt(0) }, i.peekMaxSlot().?);
-    try testing.expectEqualDeep(Span{ .len = 4, .index = @enumFromInt(0) }, i.peekMinSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 4, .index = @fromBackingInt(@intCast(0)) }, i.peekMaxSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 4, .index = @fromBackingInt(@intCast(0)) }, i.peekMinSlot().?);
 
     _ = try i.load("hhhhhh");
     // ____fffhhhhhh
     try testing.expectEqual(13, i.storage.items.len);
     try testing.expectEqual(1, i.slots.items.len);
-    try testing.expectEqualDeep(Span{ .len = 4, .index = @enumFromInt(0) }, i.peekMaxSlot().?);
-    try testing.expectEqualDeep(Span{ .len = 4, .index = @enumFromInt(0) }, i.peekMinSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 4, .index = @fromBackingInt(@intCast(0)) }, i.peekMaxSlot().?);
+    try testing.expectEqualDeep(Span{ .len = 4, .index = @fromBackingInt(@intCast(0)) }, i.peekMinSlot().?);
 }
 
 fn testStringIsEql(s: String, r: []const u8) !void {
