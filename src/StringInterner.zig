@@ -341,7 +341,6 @@ pub const String = packed struct {
         lhs: String,
         rhs: String,
     ) bool {
-        if (lhs.len != rhs.len) return false;
         if (lhs.isShort()) {
             return lhs.payload.content == rhs.payload.content;
         }
